@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# 本地配置（模板文件必须提交，见 global-rules §8）
+*.local.*
+
+# 渲染产物
+*.svg
+*.png
+*.pdf
+!assets/**
+
+# Agent 运行时状态（本仓库是文档仓，.claude/ 需随仓提交）
+.omc/
