@@ -30,7 +30,9 @@ set -euo pipefail
 readonly MIRROR_HOST="mirrors.tuna.tsinghua.edu.cn"
 readonly TARGET_USER="${SUDO_USER:-$(id -un)}"
 readonly TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
-readonly NVM_VERSION="v0.40.3"
+# 注意：变量名不能叫 NVM_VERSION —— nvm.sh 内部也用这个名字，
+# 我们把它 readonly 之后，nvm.sh 里的 `local NVM_VERSION` 会直接报错
+readonly NVM_TAG="v0.40.3"
 readonly TS="$(date +%Y%m%d-%H%M%S)"
 
 SKIP_MIRROR="${SKIP_MIRROR:-0}"
@@ -348,13 +350,33 @@ trusted-host = ${MIRROR_HOST}"; then
     info "安装 uv（astral.sh + GitHub，走代理）"
     # 用子 shell 限定代理作用域：安装脚本内部还会再下载二进制，
     # 所以代理必须对整个管道生效，但不能泄漏到后续步骤
+    # 官方安装脚本内部还会再从 GitHub 下二进制，
+    # 所以代理必须覆盖整个管道 —— 用子 shell 限定作用域，不泄漏到后续步骤
+    local uv_ok=0
     if [[ -n "$PROXY_URL" ]]; then
       ( export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
-        curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh ) \
-        || warn "uv 安装失败，可事后手动装"
+        curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh ) && uv_ok=1
     else
-      curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh \
-        || warn "uv 安装失败（网络问题），可事后手动装"
+      curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh && uv_ok=1
+    fi
+
+    # 兜底：官方脚本失败时，直接从 GitHub Releases 拉预编译二进制
+    if [[ "$uv_ok" == "0" ]]; then
+      warn "官方安装脚本失败，改从 GitHub Releases 直接下二进制"
+      local uv_tgz="/tmp/uv-x86_64-unknown-linux-gnu.tar.gz"
+      if with_proxy curl -fsSL --connect-timeout 30 \
+           https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz \
+           -o "$uv_tgz"; then
+        mkdir -p "${TARGET_HOME}/.local/bin"
+        tar -xzf "$uv_tgz" -C /tmp
+        install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv  "${TARGET_HOME}/.local/bin/uv"
+        install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uvx "${TARGET_HOME}/.local/bin/uvx" 2>/dev/null || true
+        rm -rf "$uv_tgz" /tmp/uv-x86_64-unknown-linux-gnu
+        info "uv 已通过兜底方式安装"
+      else
+        warn "uv 兜底安装也失败，可事后手动装"
+        rm -f "$uv_tgz"
+      fi
     fi
   fi
 }
@@ -429,14 +451,14 @@ m7_nodejs() {
   if [[ -s "${nvm_dir}/nvm.sh" ]]; then
     skip "nvm 已安装于 ${nvm_dir}"
   else
-    info "安装 nvm ${NVM_VERSION}（GitHub，走代理）"
+    info "安装 nvm ${NVM_TAG}（GitHub，走代理）"
     # git clone 而不是 install.sh：报错更清楚，且方便以后切版本。
     # git 会读取 http_proxy / https_proxy，with_proxy 把它们只喂给这一条命令。
-    if ! with_proxy git clone --depth 1 --branch "$NVM_VERSION" \
+    if ! with_proxy git clone --depth 1 --branch "$NVM_TAG" \
            https://github.com/nvm-sh/nvm.git "$nvm_dir" 2>/dev/null; then
       warn "nvm 下载失败（GitHub 不可达？），跳过 Node.js 安装"
       warn "可事后手动执行："
-      warn "    git clone --depth 1 --branch ${NVM_VERSION} https://github.com/nvm-sh/nvm.git ~/.nvm"
+      warn "    git clone --depth 1 --branch ${NVM_TAG} https://github.com/nvm-sh/nvm.git ~/.nvm"
       return 0
     fi
   fi
@@ -516,7 +538,7 @@ m8_summary() {
   if [[ -s "${TARGET_HOME}/.nvm/nvm.sh" ]]; then
     export NVM_DIR="${TARGET_HOME}/.nvm"
     # shellcheck disable=SC1090,SC1091
-    . "${NVM_DIR}/nvm.sh"
+    . "${NVM_DIR}/nvm.sh" 2>/dev/null
     printf '  %-14s %s\n' "node"   "$(node --version 2>/dev/null || echo '- 未装')"
     printf '  %-14s %s\n' "npm"    "$(npm --version 2>/dev/null || echo '-')"
   else
