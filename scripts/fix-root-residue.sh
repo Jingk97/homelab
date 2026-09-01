@@ -153,8 +153,10 @@ m1_scan() {
            "$TARGET_HOME/.cache" "$TARGET_HOME/.config"; do
     [[ -e "$p" ]] || continue
     if sudo find "$p" ! -user "$TARGET_USER" -print -quit 2>/dev/null | grep -q .; then
+      # 注意 || true：find 碰到不可读目录会返回非 0，
+      # set -o pipefail 下整个赋值随之失败，会直接杀掉脚本
       local n
-      n="$(sudo find "$p" ! -user "$TARGET_USER" 2>/dev/null | wc -l)"
+      n="$(sudo find "$p" ! -user "$TARGET_USER" 2>/dev/null | wc -l || true)"
       RESIDUE+=("chown|$p|存在 $n 个非 $TARGET_USER 属主的文件，普通用户无写权限")
     fi
   done
@@ -306,9 +308,25 @@ m4_check_tools() {
     || soso "运维工具" "缺 ${missing[*]}"
 
   missing=()
-  for c in git jq rg fd bat yq gcc make; do
+  for c in git jq rg yq gcc make; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
+
+  # fd 和 bat 在 Ubuntu 里被改名成 fdfind / batcat（避免和别的包冲突），
+  # provision-base.sh 的 M4 会建软链恢复常用名。两个名字都认：
+  # 本体在但软链没建成时，要说清是【软链】的问题，而不是笼统报"缺"
+  local pair short real
+  for pair in fd:fdfind bat:batcat; do
+    short="${pair%%:*}"; real="${pair##*:}"
+    if command -v "$short" >/dev/null 2>&1; then
+      :
+    elif command -v "$real" >/dev/null 2>&1; then
+      soso "$short 命令名" "本体 $real 已装，但 /usr/local/bin/$short 软链没建成"
+    else
+      missing+=("$short")
+    fi
+  done
+
   [[ ${#missing[@]} -eq 0 ]] && ok "研发工具" "齐全" \
     || soso "研发工具" "缺 ${missing[*]}"
 
@@ -324,8 +342,10 @@ m5_check_lang() {
   step "M5 · 体检 · 语言运行时"
 
   # ── Python ────────────────────────────────────────────────
+  # || true 不能省：python3 不存在时返回 127，pipefail 会让赋值失败并终止脚本，
+  # 结果就是下面这条"未安装"的 FAIL 永远走不到 —— 该报错的时候反而崩了
   local v
-  v="$(python3 --version 2>/dev/null | awk '{print $2}')"
+  v="$(python3 --version 2>/dev/null | awk '{print $2}' || true)"
   [[ -n "$v" ]] && ok "python3" "$v" || bad "python3" "未安装"
 
   if as_user 'command -v pipx' >/dev/null; then
@@ -336,9 +356,10 @@ m5_check_lang() {
 
   # 🔴 这一项就是 root 误跑的直接症状：
   #    uv 装到了 /root/.local/bin，日常账号 command -v uv 什么也找不到。
-  local up
+  local up uv_ver
   if up="$(uv_path_of "$TARGET_HOME")"; then
-    ok "uv" "$(as_user 'uv --version' || "$up" --version 2>/dev/null | awk '{print $2}') ($up)"
+    uv_ver="$("$up" --version 2>/dev/null | awk '{print $2}' || true)"
+    ok "uv" "${uv_ver:-版本读取失败} ($up)"
   elif sudo test -x /root/.local/bin/uv; then
     bad "uv" "🔴 只存在于 /root/.local/bin —— 正是 root 误跑的残留"
   else
@@ -384,8 +405,11 @@ m5_check_lang() {
   fi
 
   # ── 家目录属主兜底检查 ────────────────────────────────────
+  # 🔴 || true 是必须的：head -5 读够就退出，find 会吃到 SIGPIPE 返回 141，
+  #    pipefail 下整个赋值失败 → set -e 杀掉脚本。而触发条件恰好是
+  #    "root 属主文件超过 5 个"，也就是最需要报错的那种情况
   local dirty
-  dirty="$(sudo find "$TARGET_HOME" -maxdepth 3 ! -user "$TARGET_USER" 2>/dev/null | head -5)"
+  dirty="$(sudo find "$TARGET_HOME" -maxdepth 3 ! -user "$TARGET_USER" 2>/dev/null | head -5 || true)"
   if [[ -n "$dirty" ]]; then
     bad "家目录属主" "仍存在非 $TARGET_USER 属主的文件"
     printf '%s\n' "$dirty" | sed 's/^/          /'
