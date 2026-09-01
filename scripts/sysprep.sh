@@ -54,6 +54,9 @@ SKIP_UPGRADE="${SKIP_UPGRADE:-0}"
 KEEP_STATIC_IP="${KEEP_STATIC_IP:-0}"
 ENABLE_PVE_CLOUDINIT="${ENABLE_PVE_CLOUDINIT:-0}"
 
+# M1 检测到的用户私钥，M8 收尾时会再提醒一次（很容易在满屏输出里被漏掉）
+PRIVKEY_FILES=()
+
 export DEBIAN_FRONTEND=noninteractive
 
 # ──────────────────────────────────────────────────────────────
@@ -110,7 +113,9 @@ m0_precheck() {
   sudo -n true 2>/dev/null || warn "sudo 需要密码，后面会提示输入"
 
   local ips
-  ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | paste -sd' ' -)"
+  # || true 不能省：机器还没拿到 IP 时 grep -v 无输出返回 1，
+  # pipefail 下赋值失败会直接终止脚本
+  ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | paste -sd' ' - || true)"
 
   echo
   printf '\033[1;33m  即将对这台机器执行【不可逆】的去身份化：\033[0m\n'
@@ -199,7 +204,40 @@ m1_precheck_quality() {
   # ④ sudo 免密
   sudo -n true 2>/dev/null && done_ "sudo 免密生效" || { warn "sudo 免密未生效"; issues=$((issues + 1)); }
 
-  # ⑤ 磁盘是否支持 discard —— 不支持的话 M7 的 fstrim 是空操作
+  # ⑤ 🔴 用户 SSH 私钥 —— 会被原样复制进【每一台】克隆机
+  #
+  #    和主机密钥是同一类风险：一份私钥变成 N 份，任何一台被拿下，
+  #    攻击者就能拿着这把钥匙去它能到的所有地方（Git 仓库、跳板机、其他节点）。
+  #
+  #    但【不自动删】—— 也可能是你故意放进模板的（比如想让每台克隆机
+  #    开箱就能拉私有仓库）。这是个业务判断，不该由脚本替你做。
+  #
+  #    识别方式按【文件内容】而不是文件名：叫什么名字都可能是私钥，
+  #    但私钥的第一行一定是 "-----BEGIN ... PRIVATE KEY-----"。
+  local d kf
+  for d in "$TARGET_HOME/.ssh" /root/.ssh; do
+    sudo test -d "$d" || continue
+    while IFS= read -r kf; do
+      [[ -n "$kf" ]] || continue
+      sudo head -1 "$kf" 2>/dev/null | grep -q 'BEGIN .*PRIVATE KEY' \
+        && PRIVKEY_FILES+=("$kf")
+    done < <(sudo find "$d" -maxdepth 1 -type f \
+               ! -name '*.pub' ! -name 'known_hosts*' \
+               ! -name 'authorized_keys*' ! -name 'config' 2>/dev/null || true)
+  done
+
+  if [[ ${#PRIVKEY_FILES[@]} -gt 0 ]]; then
+    warn "🔴 发现 ${#PRIVKEY_FILES[@]} 个 SSH 私钥，会被复制进【每一台】克隆机："
+    printf '          %s\n' "${PRIVKEY_FILES[@]}"
+    warn "  风险同主机密钥：一份私钥变成 N 份，任何一台被拿下即可冒充其余"
+    warn "  【不自动删】—— 也可能是你故意放的（让每台克隆机都能拉私有仓库）"
+    warn "  要删就手动执行：sudo rm -f ${PRIVKEY_FILES[*]}"
+    issues=$((issues + 1))
+  else
+    done_ "两个 .ssh 目录下均无私钥（$TARGET_USER 与 root）"
+  fi
+
+  # ⑥ 磁盘是否支持 discard —— 不支持的话 M7 的 fstrim 是空操作
   local root_src disc
   root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
   disc="$(lsblk -Dno DISC-MAX "$root_src" 2>/dev/null | head -1 | tr -d ' ' || true)"
@@ -272,7 +310,7 @@ m4_network_dhcp() {
   # 有多块网卡时，前缀匹配可能选中一块没接线的。
   local nic
   nic="$(ip route show default 2>/dev/null | awk '{print $5}' | head -1 || true)"
-  [[ -n "$nic" ]] || nic="$(ip -o link show | awk -F': ' '$2 ~ /^(en|eth)/ {print $2; exit}')"
+  [[ -n "$nic" ]] || nic="$(ip -o link show | awk -F': ' '$2 ~ /^(en|eth)/ {print $2; exit}' || true)"
   [[ -n "$nic" ]] || { warn "探测不到网卡名，跳过网络配置"; return 0; }
   info "网卡：$nic"
 
@@ -498,6 +536,14 @@ m8_report() {
   warn "已删除 SSH 主机密钥，本机重新开机后 SSH 指纹会变，Mac 上需要执行："
   warn "    ssh-keygen -R <这台机器的IP>"
   echo
+
+  # M1 的告警很容易被后面几百行输出淹掉，收尾时再提一次
+  if [[ ${#PRIVKEY_FILES[@]} -gt 0 ]]; then
+    warn "🔴 再提醒一次：模板里还留着 ${#PRIVKEY_FILES[@]} 个 SSH 私钥，"
+    warn "   它们会进入每一台克隆机。确认是故意保留的话可以忽略："
+    printf '\033[1;33m       %s\033[0m\n' "${PRIVKEY_FILES[@]}"
+    echo
+  fi
 
   if [[ $NO_SHUTDOWN -eq 1 ]]; then
     warn "--no-shutdown / --dry-run：未关机。请自行 sudo shutdown -h now"
