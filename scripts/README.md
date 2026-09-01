@@ -129,6 +129,8 @@ SKIP_LANG=1   ./provision-base.sh
 | 项 | 主路径 | 兜底 |
 |---|---|---|
 | **uv** | `astral.sh/uv/install.sh` | GitHub Releases 预编译二进制 → `~/.local/bin/` |
+
+> 🟡 **uv 的安装路径不固定**：不同版本的官方脚本落点不一样（新版 `~/.local/bin`、旧版 `~/.cargo/bin`）。脚本用 `uv_path()` 依次探测 `~/.local/bin`、`~/.cargo/bin`、`~/.uv/bin`、`/usr/local/bin`，再回落到 `command -v`，避免"明明装好了却报未安装"。
 | **Go** | `golang.google.cn`（直连） | `go.dev`（走代理） |
 
 ### 🔴 已知的变量命名约束

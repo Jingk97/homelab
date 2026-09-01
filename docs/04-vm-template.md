@@ -544,6 +544,8 @@ curl ... golang.google.cn/...             # 直连
 > 🟡 **yq 的下载改成了「用户态下载到 `/tmp` → `sudo install`」**，而不是 `sudo -E curl`。这样代理变量不用穿过 `sudo`，避开 sudo 的环境清空问题。
 
 > 🔴 **`uv` 有兜底路径**：官方 `astral.sh/uv/install.sh` 失败时，脚本会改从 GitHub Releases 直接拉预编译二进制装到 `~/.local/bin/`。两条路都失败才告警跳过。
+>
+> **而且不能只认一个安装路径** —— 不同版本的官方安装脚本落点不一样（新版 `~/.local/bin`、旧版 `~/.cargo/bin`），只查一个会误判成"未安装"，实际上装好了。脚本用 `uv_path()` 依次探测四个候选目录再回落到 `command -v`，装完还会打印实际落点。
 
 #### 一个变量命名的坑
 

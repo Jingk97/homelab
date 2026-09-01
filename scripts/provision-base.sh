@@ -73,6 +73,24 @@ with_proxy() {
   fi
 }
 
+# 探测 uv 的实际位置。
+# 不同版本的官方安装脚本落点不同（~/.local/bin 是新版默认，
+# 旧版落在 ~/.cargo/bin），只认一个路径会误判成"未安装"。
+uv_path() {
+  local c
+  for c in "${TARGET_HOME}/.local/bin/uv" \
+           "${TARGET_HOME}/.cargo/bin/uv" \
+           "${TARGET_HOME}/.uv/bin/uv" \
+           /usr/local/bin/uv; do
+    [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  # 最后再看 PATH 里有没有
+  local p
+  p="$(command -v uv 2>/dev/null || true)"
+  [[ -n "$p" ]] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+
 # 幂等写入：内容有变化才写盘并返回 0；无变化返回 1。
 # 调用方据此决定要不要重启服务 —— 避免每次执行都无谓地重启系统服务。
 write_if_changed() {
@@ -344,8 +362,9 @@ trusted-host = ${MIRROR_HOST}"; then
 
   # uv：Astral 的 Python 包/版本管理器，比 pip 快一到两个数量级，
   #     能自己下载并管理多个 Python 版本，不污染系统 Python。
-  if command -v uv > /dev/null 2>&1 || [[ -x "${TARGET_HOME}/.local/bin/uv" ]]; then
-    skip "uv 已安装"
+  local uv_bin
+  if uv_bin="$(uv_path)"; then
+    skip "uv 已安装：${uv_bin}"
   else
     info "安装 uv（astral.sh + GitHub，走代理）"
     # 用子 shell 限定代理作用域：安装脚本内部还会再下载二进制，
@@ -377,6 +396,20 @@ trusted-host = ${MIRROR_HOST}"; then
         warn "uv 兜底安装也失败，可事后手动装"
         rm -f "$uv_tgz"
       fi
+    fi
+
+    # 装完立刻验证并打印实际落点 —— 不同版本安装脚本的目标目录不一样
+    if uv_bin="$(uv_path)"; then
+      info "uv 安装成功：${uv_bin}（$("$uv_bin" --version 2>/dev/null || echo '版本未知')）"
+      # 确保 ~/.local/bin 在 PATH 里，否则新 shell 里敲 uv 找不到
+      if [[ "$uv_bin" == "${TARGET_HOME}/.local/bin/uv" ]] \
+         && ! grep -q '\.local/bin' "${TARGET_HOME}/.bashrc" 2>/dev/null; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${TARGET_HOME}/.bashrc"
+        info "已把 ~/.local/bin 加入 ~/.bashrc 的 PATH"
+      fi
+    else
+      warn "uv 安装后仍未在已知路径找到，请手动确认："
+      warn "    find \$HOME -maxdepth 4 -type f -name uv"
     fi
   fi
 }
@@ -533,7 +566,12 @@ m8_summary() {
   printf '  %-14s %s\n' "yq"       "$(yq --version 2>/dev/null | awk '{print $NF}' || echo '- 未装')"
   printf '  %-14s %s\n' "python3"  "$(python3 --version 2>/dev/null | awk '{print $2}' || echo '-')"
   printf '  %-14s %s\n' "pipx"     "$(pipx --version 2>/dev/null || echo '-')"
-  printf '  %-14s %s\n' "uv"       "$("${TARGET_HOME}/.local/bin/uv" --version 2>/dev/null | awk '{print $2}' || echo '- 未装')"
+  local _uv
+  if _uv="$(uv_path)"; then
+    printf '  %-14s %s\n' "uv"     "$("$_uv" --version 2>/dev/null | awk '{print $2}') ($_uv)"
+  else
+    printf '  %-14s %s\n' "uv"     "- 未装"
+  fi
   printf '  %-14s %s\n' "go"       "$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}' || echo '- 未装')"
   if [[ -s "${TARGET_HOME}/.nvm/nvm.sh" ]]; then
     export NVM_DIR="${TARGET_HOME}/.nvm"
