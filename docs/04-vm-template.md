@@ -478,28 +478,74 @@ chmod +x provision-base.sh
 
 | 环境变量 | 作用 |
 |---|---|
-| **`PROXY`** | 走代理执行，自动展开成 `http_proxy` / `https_proxy` / `no_proxy` |
+| **`PROXY`** | 境外目标走代理。**只施加于 GitHub / astral.sh / go.dev**，国内镜像仍直连 |
 | `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
 | `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
 
 > **为什么不能用 root 跑**：`nvm` 和 `uv` 安装在**用户目录**（`~/.nvm`、`~/.local/bin`）。用 root 执行会装到 `/root` 下，普通用户完全用不了。脚本会检测并警告。
 
-### 5.2.1 🔴 代理：三个模块依赖境外网络
+### 5.2.1 🔴 代理：只能作用于境外目标
 
-脚本 8 个模块里，**5 个走国内镜像可直连，3 个依赖 GitHub**：
+#### 一个必踩的坑
 
-| 模块 | 下载源 | 国内直连 |
+把代理全局 export 之后再跑脚本，`apt update` 会直接失败：
+
+```
+Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InRelease
+403  Forbidden [IP: 192.168.5.100 6152]
+                    ↑ 这是代理的地址
+```
+
+**原因**：apt 把清华镜像的请求也发给了代理，代理转发到境外节点 → **出口 IP 变成境外** → 镜像站返回 403。
+
+🔴 **国内镜像走代理不但没必要，而且一定失败。**
+
+#### 正确划分
+
+脚本按**目标地址**决定要不要用代理，而不是全局开关：
+
+| 目标 | 走代理？ | 说明 |
 |---|---|---|
-| M1 apt / M5 pip / M7 npm 与 node 二进制 | 清华镜像 | 🟢 稳 |
-| M6 Go 二进制 | `golang.google.cn`（Go 官方中国站） | 🟢 稳 |
-| M6 GOPROXY | `goproxy.cn` | 🟢 稳 |
-| 🔴 **M4 yq** | `github.com/mikefarah/yq/releases` | 🔴 不稳 |
-| 🔴 **M5 uv** | `astral.sh` → GitHub releases | 🔴 不稳 |
-| 🔴 **M7 nvm** | `github.com/nvm-sh/nvm.git` | 🔴 不稳 |
+| M1 apt / M3 / M4 / M5 的 apt install | 🔴 **直连** | 清华镜像 |
+| M5 pip | 🔴 直连 | 清华镜像 |
+| M6 Go 版本查询 + tarball | 🔴 **直连** | `golang.google.cn` 是 Go 官方中国站点 |
+| M6 GOPROXY | 🔴 直连 | `goproxy.cn` |
+| M7 Node 二进制 | 🔴 直连 | 清华 `nodejs-release` |
+| **M0 GitHub 预检** | 🟢 **走代理** | |
+| **M4 yq** | 🟢 走代理 | `github.com/mikefarah/yq/releases` |
+| **M5 uv** | 🟢 走代理 | `astral.sh` → GitHub releases |
+| **M7 nvm 本体** | 🟢 走代理 | `github.com/nvm-sh/nvm.git` |
+| M6 Go 回退源 | 🟢 仅回退时 | `go.dev`，中国站点不通才用 |
 
-**M0 会先做连通性预检**，跑之前就告诉你 GitHub 通不通，而不是跑到 M4 才失败。不通时告警并让你选择是否继续（继续的话其余模块照常完成，三项失败的可事后补装）。
+#### 实现方式
 
-**起点必须是 Mac 上已有的代理**（如 Surge），不能指望先建 `vm-router`：
+```bash
+# 脚本开头：把继承来的代理收编，然后从全局环境清除
+PROXY_URL="${PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+
+# 只对单条命令施加代理，变量不泄漏到其他地方
+with_proxy() {
+  if [[ -n "$PROXY_URL" ]]; then
+    http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" \
+    HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" "$@"
+  else
+    "$@"
+  fi
+}
+
+# 用法
+with_proxy curl ... github.com/...        # 走代理
+curl ... golang.google.cn/...             # 直连
+```
+
+> 🔴 **脚本会主动 `unset` 继承来的代理变量。** 你在 shell 里 `export https_proxy=...` 之后再跑脚本，脚本会把它收编成内部的 `PROXY_URL` 再清除全局的 —— 否则 apt 继承了那些变量，照样 403。
+
+> 🟡 **yq 的下载改成了「用户态下载到 `/tmp` → `sudo install`」**，而不是 `sudo -E curl`。这样代理变量不用穿过 `sudo`，避开 sudo 的环境清空问题。
+
+#### 起点必须是 Mac 上已有的代理
+
+不能指望先建 `vm-router`：
 
 ```
 建 vm-router 需要下载 mihomo / netbird  →  这两个也在 GitHub 上  →  需要代理
@@ -511,24 +557,28 @@ Mac 侧（Surge 为例）：开启「允许来自局域网的连接」，记下 
 skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local
 ```
 
-VM 侧先验证再跑：
+跑之前先验证：
 
 ```bash
-export https_proxy=http://192.168.5.9:6152
-curl -I --connect-timeout 10 https://github.com && echo "代理 OK"
+# 直连能通国内镜像
+curl -I --connect-timeout 10 https://mirrors.tuna.tsinghua.edu.cn/ && echo "镜像直连 OK"
 
+# 经代理能通 GitHub
+https_proxy=http://192.168.5.9:6152 curl -I --connect-timeout 10 https://github.com && echo "代理 OK"
+
+# 跑脚本
 PROXY=http://192.168.5.9:6152 ./provision-base.sh
 ```
 
-> 🔴 **`sudo` 默认清空环境变量**，所以脚本内所有联网的 `sudo` 调用都用了 `sudo -E` 显式继承代理。这一点漏掉的话，即使设了代理，`sudo curl` 那行还是会直连 GitHub。
->
-> 代理只在本次会话生效，**不写入任何持久化配置**。等 `vm-router` 建好后，代理角色由它接管，Surge 退回只服务 Mac 自己。
+M0 会自动做上面这两项预检并打印结果。
+
+> 代理只在本次执行生效，**不写入任何持久化配置**。等 `vm-router` 建好后，代理角色由它接管，Surge 退回只服务 Mac 自己。
 
 ### 5.3 脚本做了什么
 
 | 模块 | 内容 | 关键说明 |
 |---|---|---|
-| **M0** 前置检查 | 拒绝 root 直跑、确认系统、确认 sudo、**显示代理、预检 GitHub 连通性** | 见 5.2.1 |
+| **M0** 前置检查 | 拒绝 root 直跑、确认系统、确认 sudo、**清除继承的代理变量、预检国内镜像直连 + GitHub 经代理** | 见 5.2.1 |
 | **M1** apt 源 + 更新 | 切清华镜像（**deb822 格式**）+ `full-upgrade` | Ubuntu 24.04 用 `.sources` 而非 `.list`，格式不同 |
 | **M2** 系统基础 | 时区 / NTP / DNS / journald / locale / sudo 免密 | 详见下表 |
 | **M3** 运维工具 | `htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux vim …` | |

@@ -34,7 +34,7 @@ cd homelab/scripts
 
 | 环境变量 | 作用 |
 |---|---|
-| **`PROXY`** | 走代理执行。自动展开成 `http_proxy` / `https_proxy` / `no_proxy` 三个标准变量 |
+| **`PROXY`** | 境外目标走代理。**只施加于 GitHub / astral.sh / go.dev**，国内镜像仍直连 |
 | `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
 | `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
 
@@ -44,23 +44,39 @@ SKIP_MIRROR=1 ./provision-base.sh
 SKIP_LANG=1   ./provision-base.sh
 ```
 
-### 🔴 关于代理
+### 🔴 关于代理：只作用于境外目标
 
-脚本里 **8 个模块有 3 处依赖境外网络**：
+**代理不做全局导出**，只在访问境外目标的那几条命令上临时施加。
 
-| 依赖境外 | 下载源 |
+| 目标 | 走代理？ |
 |---|---|
-| **M4 yq** | `github.com/mikefarah/yq/releases` |
-| **M5 uv** | `astral.sh` → GitHub releases |
-| **M7 nvm** | `github.com/nvm-sh/nvm.git` |
+| apt（清华镜像） | 🔴 **直连** |
+| pip（清华镜像） | 🔴 直连 |
+| npm registry / Node 二进制（npmmirror / 清华） | 🔴 直连 |
+| Go 版本查询与 tarball（`golang.google.cn`） | 🔴 直连 |
+| **M0 GitHub 预检** | 🟢 走代理 |
+| **M4 yq**（`github.com/mikefarah/yq`） | 🟢 走代理 |
+| **M5 uv**（`astral.sh` → GitHub） | 🟢 走代理 |
+| **M7 nvm 本体**（`github.com/nvm-sh/nvm.git`） | 🟢 走代理 |
+| M6 Go 回退源（`go.dev`） | 🟢 仅回退时走代理 |
 
-其余全部走国内镜像（apt/pip/npm 清华、Go 用 `golang.google.cn`、GOPROXY 用 `goproxy.cn`），国内直连即可。
+> #### 🔴 为什么国内镜像不能走代理
+>
+> ```
+> Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InRelease
+> 403  Forbidden [IP: 192.168.5.100 6152]
+> ```
+>
+> 走代理后**出口 IP 变成境外**，镜像站直接拒绝。国内镜像必须直连。
 
-**M0 会做连通性预检**：跑之前先测 GitHub 通不通，不通会明确告警并让你选择是否继续 —— 而不是跑到一半才失败。
+**脚本会主动清除继承来的代理变量。** 如果你在 shell 里 `export https_proxy=...` 之后再跑脚本，脚本会把它收编成内部的 `PROXY_URL`，然后**从全局环境中 unset** —— 否则 apt 会继承那些变量，照样踩 403。
 
-> **为什么必须用 `PROXY=` 而不是先 `export`**：`sudo` 默认会清空环境变量。脚本内所有需要联网的 `sudo` 调用都用了 `sudo -E` 显式继承，但你自己 `export` 之后再跑脚本，效果和 `PROXY=` 是一样的 —— `PROXY=` 只是少敲三行。
+**M0 会做两项连通性预检**：
 
-代理只在本次会话生效，**不写入任何持久化配置**。
+1. 清华镜像**直连**是否可达（不通说明 DNS/网关有问题）
+2. GitHub 是否可达（经代理或直连），不通则告警并让你选择是否继续
+
+代理只在本次执行生效，**不写入任何持久化配置**。
 
 ### 做了什么
 
