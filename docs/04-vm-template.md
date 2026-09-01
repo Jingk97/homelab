@@ -482,7 +482,21 @@ chmod +x provision-base.sh
 | `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
 | `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
 
-> **为什么不能用 root 跑**：`nvm` 和 `uv` 安装在**用户目录**（`~/.nvm`、`~/.local/bin`）。用 root 执行会装到 `/root` 下，普通用户完全用不了。脚本会检测并警告。
+> 🔴 **不能以 root 执行 —— 脚本会直接拒绝**
+>
+> M5/M7 装的是**用户级**工具，它们按 `$HOME` 决定落点：
+>
+> | 工具 | 正常落点 | root 下的落点 |
+> |---|---|---|
+> | `uv` | `~/.local/bin/uv` | 🔴 `/root/.local/bin/uv` |
+> | `npm config set registry` | `~/.npmrc` | 🔴 `/root/.npmrc` |
+> | `pipx ensurepath` | `~/.bashrc` | 🔴 `/root/.bashrc` |
+> | `nvm` | 路径由脚本显式拼出，位置对 | 🔴 **目录属主变成 root，普通用户用不了** |
+>
+> **这类问题不会报错**，只会在你后来敲命令时"找不到" —— 或者汇总里显示"未装"但 `find` 得到 `/root/.local/bin/uv`。
+>
+> 正确用法：**用日常账号执行**，脚本内部需要提权的地方会自己调 `sudo`。
+> 确实只有 root 可用的机器：`ALLOW_ROOT=1 ./provision-base.sh`。
 
 ### 5.2.1 🔴 代理：只能作用于境外目标
 

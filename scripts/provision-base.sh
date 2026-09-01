@@ -109,14 +109,38 @@ write_if_changed() {
 m0_precheck() {
   step "M0 · 前置检查"
 
-  # 1. 必须是普通用户 + sudo，不能直接 root 跑
-  #    原因：nvm / uv 装在用户目录，用 root 跑会装到 /root 下，普通用户用不了
-  if [[ $EUID -eq 0 && -z "${SUDO_USER:-}" ]]; then
-    warn "检测到以 root 直接运行。"
-    warn "nvm 和 uv 会装到 /root 下，普通用户将无法使用。"
-    warn "建议改用：普通用户执行 ./provision-base.sh"
-    read -rp "    仍要继续？[y/N] " ans
-    [[ "$ans" == "y" || "$ans" == "Y" ]] || exit 1
+  # 1. 🔴 必须以普通用户执行，root（含 sudo 提权）一律拒绝
+  #
+  #    原因：M5/M7 装的是【用户级】工具，它们内部用 $HOME 决定落点：
+  #      - uv 官方安装脚本  → $HOME/.local/bin      root 下变成 /root/.local/bin
+  #      - npm config set   → $HOME/.npmrc          root 下变成 /root/.npmrc
+  #      - pipx ensurepath  → $HOME/.bashrc         root 下变成 /root/.bashrc
+  #    而 nvm 用的是脚本里显式拼的 $TARGET_HOME 路径，会在 /home/xxx 下
+  #    创建【属主为 root】的目录，导致普通用户根本用不了。
+  #
+  #    结果就是：装是装上了，但装错了地方，或者装对地方但没权限。
+  #    这类问题不会报错，只会在你后来敲命令时"找不到"。
+  if [[ $EUID -eq 0 ]]; then
+    if [[ "${ALLOW_ROOT:-0}" == "1" ]]; then
+      warn "ALLOW_ROOT=1，以 root 继续执行 —— 用户级工具会落到 /root 下"
+    else
+      printf '\033[1;31m\n' >&2
+      echo "  [错误] 不能以 root 执行本脚本。" >&2
+      echo >&2
+      echo "  M5/M7 装的是用户级工具，它们按 \$HOME 决定安装位置：" >&2
+      echo "      uv    → \$HOME/.local/bin   root 下会装到 /root/.local/bin" >&2
+      echo "      npm   → \$HOME/.npmrc       root 下会写到 /root/.npmrc" >&2
+      echo "      nvm   → 目录属主会变成 root，普通用户无法使用" >&2
+      echo >&2
+      echo "  正确用法（用你日常使用的那个账号）：" >&2
+      echo "      su - <你的用户名>" >&2
+      echo "      cd homelab/scripts && ./provision-base.sh" >&2
+      echo >&2
+      echo "  脚本内部需要提权的地方都会自己调 sudo，不用你先提权。" >&2
+      echo "  确实要以 root 跑（比如这台机器就只有 root）：ALLOW_ROOT=1 ./provision-base.sh" >&2
+      printf '\033[0m' >&2
+      exit 1
+    fi
   fi
 
   # 2. 系统信息

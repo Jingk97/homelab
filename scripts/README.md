@@ -17,7 +17,7 @@ Homelab 的运维脚本。所有脚本都按**幂等**设计 —— 可以反复
 ### 用法
 
 ```bash
-# 在目标机器上（用普通用户，不要用 root）
+# 🔴 必须用普通用户执行，脚本会拒绝 root（详见下方「关于 root」）
 curl -fsSLO https://raw.githubusercontent.com/Jingk97/homelab/main/scripts/provision-base.sh
 chmod +x provision-base.sh
 ./provision-base.sh
@@ -29,6 +29,21 @@ chmod +x provision-base.sh
 cd homelab/scripts
 ./provision-base.sh
 ```
+
+### 🔴 关于 root
+
+**脚本会直接拒绝以 root 执行。** M5/M7 装的是用户级工具，按 `$HOME` 决定落点：
+
+| 工具 | 正常 | root 下 |
+|---|---|---|
+| `uv` | `~/.local/bin/uv` | `/root/.local/bin/uv` |
+| `npm config` | `~/.npmrc` | `/root/.npmrc` |
+| `pipx ensurepath` | `~/.bashrc` | `/root/.bashrc` |
+| `nvm` | 位置对 | **属主变 root，普通用户用不了** |
+
+这类问题**不会报错**，只会在后来敲命令时"找不到"。用日常账号跑即可 —— 脚本内部需要提权的地方会自己调 `sudo`。
+
+只有 root 可用的机器：`ALLOW_ROOT=1 ./provision-base.sh`。
 
 ### 可选开关
 
