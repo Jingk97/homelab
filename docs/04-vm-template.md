@@ -10,16 +10,25 @@
 
 ```mermaid
 flowchart TD
-    A["ISO 安装 Ubuntu<br/>静态 IP + hostname"] --> B["通用配置<br/>provision-base.sh<br/>系统基础 / 工具链 / 语言运行时"]
-    B --> C["去身份化清理<br/>清空 machine-id<br/>删除 SSH 主机密钥<br/>网络改回 DHCP<br/>清日志 + fstrim"]
-    C --> D["关机"]
-    D --> E["转换成模板<br/>此操作不可逆"]
-    E --> F["完整克隆<br/>指定新 VMID"]
-    F --> G["克隆后定制<br/>改 hostname<br/>配规划的静态 IP<br/>验证 machine-id 唯一"]
-    G --> H["投入使用"]
-    E -.->|"模板需要更新时"| I["先克隆一份出来<br/>修改后重新转成模板"]
-    I -.-> E
+    A["ISO 安装 Ubuntu<br/>静态 IP + hostname"] --> B["通用配置<br/>provision-base.sh"]
+    B --> C{"体检<br/>fix-root-residue.sh --check"}
+    C -->|"有 FAIL 项"| C1["修复残留<br/>fix-root-residue.sh"]
+    C1 --> C
+    C -->|"全部通过"| D["Web 打快照 02-base"]
+    D --> E["去身份化<br/>sysprep.sh<br/>machine-id / SSH 主机密钥<br/>改 DHCP / 清日志 / fstrim"]
+    E --> F["脚本自动关机"]
+    F --> G["Web 完整克隆一份<br/>VMID 9000"]
+    G --> H["9000 转换成模板<br/>不可逆，并开启保护"]
+    G --> I["原机开机<br/>改回 hostname 与静态 IP<br/>成为第一台业务机"]
+    H --> J["完整克隆<br/>按规划分配新 VMID"]
+    J --> K["克隆后定制<br/>hostname / 静态 IP<br/>验证 machine-id 唯一"]
+    K --> L["投入使用"]
+    H -.->|"模板需要更新时"| M["克隆出临时机<br/>改完重跑 sysprep<br/>转成新模板"]
+    M -.-> H
 ```
+
+> **为什么是「先克隆到 9000 再转模板」，而不是直接把本机转掉**
+> 转模板**不可逆**，被转掉的那台**再也开不了机**。先克隆一份出去做模板，原机就能原地改回身份、直接当第一台业务机用，省掉一次克隆。详见 [6.5](#65-转换成模板)。
 
 ---
 
@@ -708,6 +717,104 @@ go version && go env GOPROXY
 node --version && npm --version && npm config get registry
 ```
 
+不过手敲逐条确认有两个问题：**容易漏项**，而且**看不出属主是否正确**（装在对的位置但属主是 root，命令照样能跑，`nvm install` 才会失败）。
+
+**更可靠的做法是跑体检脚本**，它把上面所有检查连同属主校验一起做成**机器可判定的信号**：
+
+```bash
+./fix-root-residue.sh --check
+echo $?        # 0 = 全部通过；1 = 有 FAIL 项
+```
+
+详见 [5.8](#58-修复与体检脚本-fix-root-residuesh)。
+
+---
+
+### 5.7 各类机器用什么身份操作
+
+这是踩过坑之后总结出来的约定。**每一类机器的日常操作身份是固定的**，混用会出现"装是装上了，但装错了地方"这种不报错的问题。
+
+| 机器 | 日常操作身份 | 为什么 |
+|---|---|---|
+| **Proxmox 宿主机** | **`root`** | PVE 的设计就是如此：Web 登录用 `root@pam`，`qm` / `pct` / `pvesm` 这些命令都要 root。**不要在 PVE 上建普通用户做日常管理** —— 官方工具链没有为此设计，只会自找麻烦 |
+| **Ubuntu 虚拟机** | **普通用户（`jing`）+ sudo 免密** | 见下面三条理由 |
+| **LXC 容器内部** | 容器里的 `root` | 隔离边界在**容器**上（跑 unprivileged 容器），不在用户上。容器里再分身份是多余的 |
+
+#### 为什么虚拟机里不用 root
+
+**理由一：工具链会装错地方（真实踩过的坑）**
+
+用户级工具的落点由 `$HOME` 决定，用 root 跑安装脚本会全部跑偏：
+
+| 工具 | 用 `jing` 跑 | 用 `root` 跑 |
+|---|---|---|
+| `uv` | `~/.local/bin/uv` ✅ | `/root/.local/bin/uv` —— `jing` 敲 `uv` 提示 command not found |
+| `npm config set` | `~/.npmrc` ✅ | `/root/.npmrc` —— `jing` 的 registry 还是官方源 |
+| `pipx ensurepath` | `~/.bashrc` ✅ | `/root/.bashrc` —— `jing` 的 PATH 没变 |
+| `nvm` | 目录属主 `jing` ✅ | **位置对，但属主变 root** —— `nvm install` 直接 permission denied |
+
+**这类问题全程不报错**，只在你后来敲命令时表现为"找不到"或"没权限"，排查方向完全跑偏。
+
+**理由二：爆炸半径（这条对 AI agent 驱动的开发尤其重要）**
+
+以后让 agent 在机器上执行命令时，普通用户身份下一条写错路径的 `rm -rf` 最多毁掉家目录，**重装家目录 ≠ 重装系统**。root 身份下同一条命令能把系统删掉。加上 sudo 免密之后，需要提权的操作照样一条命令完成，**没有任何效率损失**。
+
+**理由三：路径一致性**
+
+文档、脚本、`~/.bashrc` 里写的都是 `~/...`。混用身份会让"同一条命令在不同人手里指向不同路径"，这是最难交接的一类问题。
+
+#### 什么时候确实需要 root
+
+| 场景 | 做法 |
+|---|---|
+| 装系统包、改 `/etc` 下的配置 | `sudo <命令>` —— **脚本内部会自己调 sudo，不用你先提权** |
+| 需要一个完整的 root shell | `sudo -i`（Ubuntu **锁了 root 账号**，`su -` 用不了） |
+| 连续多条特权命令 | `sudo -i` 进去做完就 `exit` 出来，**不要留在 root shell 里跑安装脚本** |
+
+> 🔴 **一条命令判断脚本是不是被 root 跑过：**
+>
+> ```bash
+> sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
+> ```
+>
+> 只要有输出，就说明用户级工具装进了 root 家目录。用 [5.8](#58-修复与体检脚本-fix-root-residuesh) 的脚本修。
+
+---
+
+### 5.8 修复与体检脚本 fix-root-residue.sh
+
+[`scripts/fix-root-residue.sh`](../scripts/fix-root-residue.sh) 做三件事：**扫描残留 → 确认后清理 → 重新体检**。
+
+```bash
+./fix-root-residue.sh              # 扫描 → 交互确认 → 清理 → 体检
+./fix-root-residue.sh --check      # 只体检，不扫描不清理
+./fix-root-residue.sh --dry-run    # 只列清单，绝不动手
+./fix-root-residue.sh --yes        # 跳过交互确认（自动化用）
+```
+
+#### 会清理什么
+
+| 类型 | 内容 | 处理 |
+|---|---|---|
+| **A · 装错地方** | `/root/.local/bin/uv`、`/root/.local/bin/uvx`、`/root/.npmrc`、`/root/.nvm` | 删除 |
+| **B · 属主错了** | `~/.nvm`、`~/.local`、`~/.npm`、`~/.cache`、`~/.config` 下的 root 属主文件 | `chown` 回日常用户 |
+| **C · 只提示** | `/root/.bashrc` 里被追加的 `NVM_DIR` / `pipx` 段落 | **不自动改** —— 那里可能还有你自己加的东西，误删代价高 |
+
+> **删除前一定会先把清单打印出来**，交互环境下要输入 `yes` 才动手；非交互环境（管道执行）下不给 `--yes` 就只体检不清理。宁可什么都不做，也不擅自删东西。
+
+#### 体检哪些项
+
+| 分组 | 项 |
+|---|---|
+| 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / DNS / guest-agent |
+| 工具 | 运维工具、研发工具是否齐全，`yq` 是否装上 |
+| 语言运行时 | `python3` / `pipx` / **`uv`（含"只在 /root 下"的专门判断）** / `go` + `GOPROXY` / **`nvm` 目录属主** / `node` / `npm` registry |
+| 兜底 | 家目录下有无非日常用户属主的文件；`/root` 下有无残留 |
+
+**退出码就是验证信号**：`0` 全部通过，`1` 存在 FAIL 项，`2` 参数或前置检查不通过。
+
+> 脚本**拒绝以 root 执行** —— 那样体检的是 `/root` 而不是日常账号，恰恰查不出要查的问题。
+
 ---
 
 ## 6. 模板化
@@ -762,88 +869,247 @@ systemd 在启动早期就要读它，文件不存在会导致部分服务启动
 | 绑定主机名的服务 | k8s、数据库等要在克隆后单独初始化 |
 | 任何已生成唯一标识的软件 | 比如已经 join 过集群的 kubelet |
 
-### 6.4 去身份化清理脚本
+### 6.4 去身份化脚本 sysprep.sh
 
-在**要转成模板的那台虚拟机里**执行：
+#### 🔴 顺序陷阱（这一节的重点）
+
+去身份化里有两步必须按特定顺序做，顺序错了会**当场翻车**：
+
+| 陷阱 | 后果 |
+|---|---|
+| **先关机，再想起来改网络** | 机器已经关了，根本没机会改 → 每台克隆机都是同一个静态 IP，**第二台开机就冲突** |
+| **改完网络执行 `netplan apply`** | IP 立刻从静态切成 DHCP，**当前 SSH 连接当场断开**，脚本收到 `SIGHUP` 被杀 → 后面的 `fstrim` 和关机**全都不会执行** |
+
+**正确顺序**：
+
+```
+改 netplan 配置文件  →  只跑 netplan generate 校验语法（不 apply）
+                     →  fstrim  →  关机
+```
+
+改动在**下次开机**自然生效。反正马上要关机，`apply` 没有任何价值，只有断连的风险。
+
+#### 用法
 
 ```bash
-#!/bin/bash
-set -e
+# 🔴 执行前先在 Proxmox 网页上打快照 —— 本脚本不可逆
+cd homelab/scripts
 
-# ① 更新到最新，装好所有克隆机都要用的通用软件
+./sysprep.sh --dry-run        # 先空跑一遍，看清楚会做什么
+./sysprep.sh                  # 交互确认（要输入 sysprep）→ 清理 → 自动关机
+./sysprep.sh --no-shutdown    # 清理完不关机，自己去 Web 上关
+```
+
+| 环境变量 | 作用 |
+|---|---|
+| `TMPL_HOSTNAME=ubuntu-tmpl` | 模板的通用主机名（默认值），克隆出来一眼看出"这台还没改名" |
+| `SKIP_UPGRADE=1` | 跳过 `apt full-upgrade` |
+| `KEEP_STATIC_IP=1` | 保留静态 IP —— **极少用**，会导致克隆机冲突 |
+| `ENABLE_PVE_CLOUDINIT=1` | 打开 Proxmox Cloud-Init 支持，见 [7](#7-进阶cloud-init-模板) |
+
+#### 脚本做了什么
+
+| 模块 | 内容 |
+|---|---|
+| **M0** | 前置检查 + **不可逆操作确认**（打印主机名 / IP / 虚拟化类型，要求输入 `sysprep`）。检测到是物理机会红字告警 |
+| **M1** | 转模板前关键项体检：家目录属主、`/root` 残留、**SSH 公钥是否在**、sudo 免密、**磁盘是否支持 discard** |
+| **M2** | 通用软件补齐：`full-upgrade` + `qemu-guest-agent` / `cloud-init` / vim curl wget htop |
+| **M3** | 主机名改成通用名，同步改 `/etc/hosts`（不改的话克隆机 `sudo` 会有几秒 DNS 解析延迟） |
+| **M4** | 网络改回 DHCP：备份原文件 → 写新配置 → `chmod 600` → **只 `generate` 不 `apply`** |
+| **M5** | **去身份化核心**：清空 `machine-id`、删 SSH 主机密钥 + **装首次启动重建的兜底服务**、`cloud-init clean`、清随机种子与 DHCP 租约 |
+| **M6** | 清理：apt 缓存与包索引、journal、`/var/log` 文本日志、shell 历史、临时目录 |
+| **M7** | `fstrim` 把已删除的块还给 LVM-Thin 池 |
+| **M8** | 结果报告 + 10 秒倒计时后关机（可 Ctrl+C 取消） |
+
+#### 比手工清理多做的三件事
+
+**① SSH 主机密钥的重建兜底 —— 这条能救命**
+
+常见说法是"删掉主机密钥，首次启动会自动重新生成"。但那**依赖 cloud-init 恰好正常跑起来**。万一没跑，`sshd` 因为没有主机密钥**根本起不来**，克隆机就只能靠 noVNC 抢救。
+
+脚本会装一个 systemd 兜底服务：
+
+```ini
+[Unit]
+Description=Regenerate SSH host keys if missing (first boot after sysprep)
+# 密钥存在时 Condition 不成立，服务直接跳过 —— 天然幂等，不需要自我禁用
+ConditionPathExistsGlob=!/etc/ssh/ssh_host_*_key
+Before=ssh.service ssh.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ssh-keygen -A
+```
+
+> ⚠️ 主机密钥删掉之后到关机之前，**不要重启 sshd** —— 会让 SSH 服务直接起不来。脚本会在这一步打印提醒。
+
+**② cloud-init 数据源检测**
+
+见 [7](#7-进阶cloud-init-模板) —— ISO 装出来的系统默认**读不到** Proxmox 注入的 cloud-init 配置盘，脚本会检测并告诉你。
+
+**③ 更精确的日志清理**
+
+```bash
+# ❌ 旧写法：会把 journal 的二进制文件也截断成 0，导致 journald 报错
+sudo find /var/log -type f -exec truncate -s 0 {} \;
+
+# ✅ 排除 /var/log/journal（那里已经由上一步的 vacuum 处理过了）
+sudo find /var/log -type f -not -path '/var/log/journal/*' -exec truncate -s 0 {} +
+```
+
+顺带说明：`history -c` 在**非交互脚本里是空操作**（脚本是子进程，清不掉你当前会话的内存历史），旧版清单里这条没有意义。真正有效的是删 `~/.bash_history` 文件 —— 而 bash 只在**正常 exit** 时回写该文件，我们最后是 `shutdown`（SIGTERM），所以不会被写回。
+
+#### 手工等价命令（顺序已修正）
+
+不想用脚本的话，按这个顺序敲。**注意第 ⑧ 步没有 `netplan apply`**：
+
+```bash
+# ① 通用软件
 sudo apt update && sudo apt full-upgrade -y
 sudo apt install -y qemu-guest-agent cloud-init vim curl wget htop
 sudo systemctl enable qemu-guest-agent
 
-# ② 清理 apt 缓存和无用包（顺序不能换：先卸载再清缓存）
+# ② 清 apt（顺序不能换：先卸载再清缓存，反过来会把待卸载包的 deb 又拉回来）
 sudo apt autoremove --purge -y
 sudo apt clean
+sudo rm -rf /var/lib/apt/lists/*
 
-# ③ 清空 machine-id（最关键的一步）
+# ③ 主机名改通用名
+sudo hostnamectl set-hostname ubuntu-tmpl
+sudo sed -i "s/\b$(hostname)\b/ubuntu-tmpl/g" /etc/hosts
+
+# ④ 清空 machine-id —— truncate，不是 rm
 sudo truncate -s 0 /etc/machine-id
 sudo rm -f /var/lib/dbus/machine-id
-sudo ln -s /etc/machine-id /var/lib/dbus/machine-id
+sudo ln -sf /etc/machine-id /var/lib/dbus/machine-id
 
-# ④ 删除 SSH 主机密钥（首次启动会自动重新生成）
-sudo rm -f /etc/ssh/ssh_host_*
+# ⑤ SSH 主机密钥重建兜底服务（先装服务，再删密钥）
+sudo tee /etc/systemd/system/regenerate-ssh-host-keys.service > /dev/null <<'EOF'
+[Unit]
+Description=Regenerate SSH host keys if missing
+ConditionPathExistsGlob=!/etc/ssh/ssh_host_*_key
+Before=ssh.service ssh.socket
+DefaultDependencies=no
+After=local-fs.target
+Wants=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ssh-keygen -A
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable regenerate-ssh-host-keys.service
+sudo rm -f /etc/ssh/ssh_host_*        # 此后不要重启 sshd
 
-# ⑤ 清空日志
-sudo journalctl --rotate
-sudo journalctl --vacuum-time=1s
-sudo find /var/log -type f -exec truncate -s 0 {} \;
-
-# ⑥ 清 shell 历史
-cat /dev/null > ~/.bash_history
-sudo sh -c 'cat /dev/null > /root/.bash_history' 2>/dev/null || true
-history -c
-
-# ⑦ 清 cloud-init 状态
+# ⑥ 其他唯一状态
 sudo cloud-init clean --logs --seed 2>/dev/null || true
+sudo rm -f /var/lib/systemd/random-seed
+sudo rm -f /var/lib/dhcp/*
 
-# ⑧ 释放未使用的块，让 thin 池回收空间
-sudo fstrim -av
+# ⑦ 清日志与历史
+sudo journalctl --rotate && sudo journalctl --vacuum-time=1s
+sudo find /var/log -type f -not -path '/var/log/journal/*' -exec truncate -s 0 {} +
+rm -f ~/.bash_history ~/.ssh/known_hosts
+sudo rm -f /root/.bash_history
+sudo rm -rf /tmp/* /var/tmp/*
 
-# ⑨ 关机
-sudo shutdown -h now
-```
-
-> **第 ⑧ 步 `fstrim` 的价值**：模板会被克隆很多次。做模板前跑一次，把"已删除但底层还占着"的块还给 LVM-Thin 池 —— **模板本身变小，之后每一份完整克隆也跟着变小**。
-
-**网络一定要改回 DHCP**（在关机之前）：
-
-```yaml
-# /etc/netplan/50-cloud-init.yaml
+# ⑧ 🔴 网络改回 DHCP —— 必须在关机之前，且【不要 netplan apply】
+NIC="$(ip route show default | awk '{print $5}' | head -1)"
+sudo cp -a /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml.bak
+sudo tee /etc/netplan/50-cloud-init.yaml > /dev/null <<EOF
 network:
   version: 2
   ethernets:
-    ens18:
+    ${NIC}:
       dhcp4: true
+EOF
+sudo chmod 600 /etc/netplan/50-cloud-init.yaml
+sudo netplan generate       # 只校验语法。执行 apply 会断开 SSH 并杀掉后续步骤
+
+# ⑨ fstrim 必须在所有删除动作【之后】
+sudo fstrim -av
+
+# ⑩ 关机
+sudo shutdown -h now
 ```
 
-```bash
-sudo netplan apply
-```
+> **第 ⑨ 步 `fstrim` 的价值**：模板会被克隆很多次。做模板前跑一次，把"已删除但底层还占着"的块还给 LVM-Thin 池 —— **模板本身变小，之后每一份完整克隆也跟着变小**。
+> 前提是 Proxmox 上这块硬盘勾了 **Discard**，否则这一步是空操作。
 
-克隆出来的机器先用 DHCP 拿个临时地址进得去，再手动改成规划的静态 IP。这比"克隆出来就冲突、进都进不去"好得多。
+---
 
 ### 6.5 转换成模板
 
+#### 先决定：把本机转掉，还是先克隆一份出去转？
+
+转模板**不可逆**，被转掉的那台**再也开不了机**。而第一台机器往往还想接着当业务机用，两个用途是冲突的。
+
+| 方案 | 做法 | 结果 |
+|---|---|---|
+| A · 直接转 | 本机 → 模板 | 本机没了，还要**再克隆一台**才能开始用 |
+| **B · 先克隆再转**（推荐） | 本机清理干净 → **完整克隆到 9000** → **9000 转模板** | 本机原地改回身份就是第一台业务机；VMID 也符合"模板用 9000+"的规范 |
+
+thin provisioning（精简置备：只占实际写入的块，不是标称容量）下这份克隆实际只占 8–10 GB，**方案 B 的成本很低**。
+
+#### VMID 编号约定
+
+| 段 | 用途 | 例 |
+|---|---|---|
+| `1xx` | 普通虚拟机，**`100 + IP 尾数`** | `111` ↔ `192.168.5.21`；`126` ↔ `192.168.5.26` |
+| `9xxx` | **模板**，和实际虚拟机分开 | `9000` = `tmpl-ubuntu-2404` |
+
+看到 `qm stop 126` 就知道动的是 `.26` 那台。**VMID 创建后不能改**，所以做模板时的 VMID 要一次定对。
+
+#### Web 操作
+
+**① 克隆出模板母本**
+
 ```
-关机后 → 右键虚拟机 → 转换成模板 (Convert to template)
+右键本机 → 克隆 (Clone)
+```
+
+| 字段 | 填 | 说明 |
+|---|---|---|
+| VM ID | `9000` | 模板专用编号段 |
+| 名称 | `tmpl-ubuntu-2404` | |
+| **模式** | **完整克隆 (Full Clone)** | 🔴 必须完整。链接克隆会让本机变成 9000 的**单点依赖**，本机一动模板就废 |
+| 目标存储 | `local-lvm` | |
+
+> **MAC 地址不用管** —— Proxmox 克隆时会自动生成新的，不会撞。
+
+**② 转换成模板**
+
+```
+右键 9000 → 转换成模板 (Convert to template)
 ```
 
 | 特性 | 说明 |
 |---|---|
 | **转换不可逆** | 模板变不回普通虚拟机 |
 | **模板不能启动** | 想改内容只能克隆一份出来改，再重新做模板 |
-| 图标会变成一张"纸" | 和普通虚拟机区分开 |
+| 磁盘变只读 | 卷名变成 `base-9000-disk-0` |
+| 图标变成一张"纸" | 和普通虚拟机区分开 |
 
-**建议给模板规范的命名：**
+**③ 开启保护，防误删**
 
 ```
-名称:  tmpl-ubuntu-2404
-VMID:  9000              ← 模板用 9000+ 编号，和实际虚拟机分开
+9000 → 选项 (Options) → 保护 (Protection) → 编辑 → ✅ 是
 ```
+
+开了之后 Proxmox 会拒绝任何删除操作，直到手动关掉它。
+
+#### 关于快照
+
+**Proxmox 并不禁止带快照转模板**，但仍然建议转之前删掉：
+
+| 原因 | 说明 |
+|---|---|
+| 空间 | 快照把去身份化**之前**的旧块钉在 thin 池里，`fstrim` 省下来的空间又还回去了 |
+| 克隆基点 | 模板带多个快照后，链接克隆要选"基于哪个快照"，容易选错且难以察觉 |
+
+**建议的时机**：去身份化跑完、克隆到 9000 并确认模板可用**之后**，再删掉原机的快照 —— 在那之前快照是你唯一的回滚点。
 
 ### 6.6 克隆
 
@@ -909,6 +1175,32 @@ sudo reboot
 上面这套"克隆后手动改 hostname 和 IP"，建三五台还行，建十几台会烦。
 
 **cloud-init 的做法**：克隆之后在 Proxmox 网页的 **Cloud-Init** 标签页里直接填用户名 / SSH 公钥 / IP / 网关 / DNS，开机后自动完成配置 —— **30 秒就能 SSH 进去**，不用进控制台、不用改任何文件。
+
+> #### 🔴 一个会让人白折腾半天的隐藏假设
+>
+> **用 ISO 装出来的系统，Proxmox 的 Cloud-Init 标签页填了也不生效。**
+>
+> Ubuntu Server 的安装器（subiquity）装完会在 `/etc/cloud/cloud.cfg.d/` 下写一条：
+>
+> ```yaml
+> datasource_list: [ None ]
+> ```
+>
+> 意思是"不要去任何地方找配置"。而 Proxmox 是通过挂载一个 **ConfigDrive / NoCloud 配置盘**把内容喂给客户机的 —— 数据源被禁掉，那张盘根本不会被读。表现就是：**界面上认真填了用户名和 IP，开机后一点反应都没有，也没有任何报错。**
+>
+> `sysprep.sh` 的 M5 会检测这个文件并提示。要打开支持：
+>
+> ```bash
+> ENABLE_PVE_CLOUDINIT=1 ./sysprep.sh
+> ```
+>
+> 它会写入 `/etc/cloud/cloud.cfg.d/90-pve-datasource.cfg`：
+>
+> ```yaml
+> datasource_list: [ NoCloud, ConfigDrive, None ]
+> ```
+>
+> 用**云镜像**（cloud image）做的模板没有这个问题 —— 云镜像本来就是给 cloud-init 用的。
 
 | | ISO 安装 → 模板 | cloud image + cloud-init |
 |---|---|---|
@@ -978,21 +1270,25 @@ free -h                                    # Swap 那一行应该全是 0
 □ 打快照 01-clean（不勾「包含内存」）
 □ Mac 上 ssh-copy-id，把公钥推进去
 □ cd homelab/scripts && ./provision-base.sh      🔴 用普通用户，不要 root
-□ 按 5.6 逐条验证（时区 / NTP / DNS / 日志上限 / 各语言版本）
-□ 打快照 02-base
+□ ./fix-root-residue.sh --check                  退出码必须是 0
+     有 FAIL 项 → ./fix-root-residue.sh 修完再来一次
+□ 打快照 02-base（不勾「包含内存」）
 ```
 
 ### 转成模板
 
 ```
-□ 跑去身份化清理脚本（6.4 节，重点：machine-id、SSH 主机密钥、fstrim）
-□ 网络改回 DHCP
-□ 关机
-□ 🔴 删掉所有快照（带快照转模板会让后续克隆行为受限）
-□ 改名 tmpl-ubuntu-2404
-□ 右键 → 转换成模板
-□ 开启「保护」防误删
-□ 克隆一台出来验证：machine-id 是新的、能改 IP、能 SSH
+□ 确认 02-base 快照已打（sysprep 不可逆，这是唯一的回滚点）
+□ ./sysprep.sh --dry-run                         先空跑，看清楚会做什么
+□ ./sysprep.sh                                   输入 sysprep 确认 → 自动关机
+     🔴 脚本内部顺序：改 DHCP（不 apply）→ fstrim → 关机
+□ Web 确认已 stopped
+□ 右键本机 → 克隆 → VMID 9000 / tmpl-ubuntu-2404 / 🔴 完整克隆
+□ 右键 9000 → 转换成模板（不可逆）
+□ 9000 → 选项 → 保护 → 是
+□ 本机开机 → noVNC 进去改回 hostname + 静态 IP → 成为第一台业务机
+□ 删掉本机的 02-base 快照（确认模板可用之后再删）
+□ 再克隆一台验证：machine-id 是新的、SSH 主机密钥已重建、能 SSH
 ```
 
 > **最后的验证别跳过** —— 模板做坏了要等你克隆了五台之后才发现，那时候返工成本高得多。
@@ -1011,6 +1307,10 @@ free -h                                    # Swap 那一行应该全是 0
 | 克隆的机器 MAC 不同却拿到同一个 IP | **machine-id 重复**（DHCP client-id 由它生成） | `truncate -s 0 /etc/machine-id` 后重启 |
 | SSH 到克隆机报主机密钥冲突 | 模板里的 SSH 主机密钥没删 | 模板里 `rm -f /etc/ssh/ssh_host_*`，重做模板 |
 | 网络完全不通 | Ubuntu 安装器里 `Subnet` 和 `Address` 填反了 | Subnet 填网段 `x.x.x.0/24`，Address 填本机 |
+| **克隆机开机后 SSH 完全连不上**，noVNC 能进 | 主机密钥删了但没重新生成，`sshd` 起不来 | noVNC 里 `sudo ssh-keygen -A && sudo systemctl restart ssh`；模板里应装 [6.4](#64-去身份化脚本-sysprepsh) 的兜底服务 |
+| **Cloud-Init 标签页填了 IP / 用户，开机毫无反应且无报错** | ISO 安装器写了 `datasource_list: [None]`，配置盘不会被读 | 见 [7](#7-进阶cloud-init-模板)，用 `ENABLE_PVE_CLOUDINIT=1 ./sysprep.sh` |
+| 去身份化脚本跑到一半 SSH 断了，机器没关成 | 执行了 `netplan apply`，IP 当场切换、脚本被 SIGHUP 杀掉 | 只跑 `netplan generate` 校验语法，**不要 apply**；见 [6.4](#64-去身份化脚本-sysprepsh) |
+| 装好的 `uv` 敲 `uv --version` 提示 command not found | 脚本被 root 跑过，装进了 `/root/.local/bin` | `./fix-root-residue.sh`；身份约定见 [5.7](#57-各类机器用什么身份操作) |
 
 ---
 

@@ -19,9 +19,13 @@
 
 ## 脚本
 
+按「配置 → 体检 → 去身份化」的顺序使用，都是幂等的，可反复执行。
+
 | 脚本 | 用途 |
 |---|---|
-| [`scripts/provision-base.sh`](scripts/provision-base.sh) | Ubuntu 24.04 模板通用配置：系统基础 + 运维/研发工具 + Python/Go/Node 运行时。幂等，可反复执行。详见 [04 · §5](docs/04-vm-template.md#5-模板通用配置脚本) |
+| [`scripts/provision-base.sh`](scripts/provision-base.sh) | **① 通用配置**：系统基础 + 运维/研发工具 + Python/Go/Node 运行时。详见 [04 · §5](docs/04-vm-template.md#5-模板通用配置脚本) |
+| [`scripts/fix-root-residue.sh`](scripts/fix-root-residue.sh) | **② 体检与修复**：清理"误用 root 跑脚本"的残留，并重新验证每一项。`--check` 只体检，**退出码即验证信号**。详见 [04 · §5.8](docs/04-vm-template.md#58-修复与体检脚本-fix-root-residuesh) |
+| [`scripts/sysprep.sh`](scripts/sysprep.sh) | **③ 去身份化**：转模板前清空 machine-id、重置 SSH 主机密钥、改回 DHCP、fstrim。🔴 **不可逆**。详见 [04 · §6.4](docs/04-vm-template.md#64-去身份化脚本-sysprepsh) |
 
 用法与设计说明见 [`scripts/README.md`](scripts/README.md)。
 
@@ -87,6 +91,7 @@ DHCP 池     192.168.5.100–199  租约 24 小时
 - [x] 网段与地址规划确定
 - [x] 软件源切换到 no-subscription
 - [x] 第一台 Ubuntu 虚拟机跑通
+- [x] 通用配置脚本 `provision-base.sh` 跑通并验证
 - [ ] 转换成模板并验证克隆
 - [ ] 软路由（VPN + 代理分流）
 - [ ] 新节点组装与安装
