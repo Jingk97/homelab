@@ -29,11 +29,13 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────
 readonly MIRROR_HOST="mirrors.tuna.tsinghua.edu.cn"
 readonly TARGET_USER="${SUDO_USER:-$(id -un)}"
-readonly TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+readonly TARGET_HOME
 # 注意：变量名不能叫 NVM_VERSION —— nvm.sh 内部也用这个名字，
 # 我们把它 readonly 之后，nvm.sh 里的 `local NVM_VERSION` 会直接报错
 readonly NVM_TAG="v0.40.3"
-readonly TS="$(date +%Y%m%d-%H%M%S)"
+TS="$(date +%Y%m%d-%H%M%S)"
+readonly TS
 
 SKIP_MIRROR="${SKIP_MIRROR:-0}"
 SKIP_LANG="${SKIP_LANG:-0}"
@@ -523,6 +525,7 @@ m7_nodejs() {
   # 写入 shell 初始化（幂等：检测到已有 NVM_DIR 则不重复追加）
   local rc="${TARGET_HOME}/.bashrc"
   if grep -q 'NVM_DIR' "$rc" 2>/dev/null; then
+    # shellcheck disable=SC2088  # 这里的 ~ 是给人看的提示文本，不是要展开的路径
     skip "~/.bashrc 已包含 nvm 初始化"
   else
     info "写入 nvm 初始化到 ~/.bashrc"
