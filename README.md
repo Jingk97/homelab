@@ -15,7 +15,15 @@
 | **01** | [Proxmox VE 安装全流程](docs/01-proxmox-install.md) | ISO 下载校验 → 启动盘制作 → BIOS 设置 → 安装向导 → 换源 → 验收 | 装机之前 |
 | **02** | [节点初始化与网络规划](docs/02-node-bootstrap.md) | 网段选型 → 地址分配方案 → 路由器配置 → 各类设备的固定 IP 方式 | 装机之前定方案，装完做配置 |
 | **03** | [Proxmox VE 核心概念](docs/03-proxmox-concepts.md) | VM vs LXC → 存储分层 → 网桥模型 → 虚拟机硬件模型 → 术语速查 | **建虚拟机之前必读** |
-| **04** | [虚拟机创建与模板化](docs/04-vm-template.md) | 创建向导逐项 → Ubuntu 安装 → 去身份化清理 → 转模板 → 克隆 | 建第一台虚拟机时 |
+| **04** | [虚拟机创建与模板化](docs/04-vm-template.md) | 创建向导逐项 → Ubuntu 安装 → 通用配置脚本 → 去身份化清理 → 转模板 → 克隆 | 建第一台虚拟机时 |
+
+## 脚本
+
+| 脚本 | 用途 |
+|---|---|
+| [`scripts/provision-base.sh`](scripts/provision-base.sh) | Ubuntu 24.04 模板通用配置：系统基础 + 运维/研发工具 + Python/Go/Node 运行时。幂等，可反复执行。详见 [04 · §5](docs/04-vm-template.md#5-模板通用配置脚本) |
+
+用法与设计说明见 [`scripts/README.md`](scripts/README.md)。
 
 > **01 和 02 有交叉**：安装向导需要先定好 IP 和主机名，那部分规划在 02。第一次操作时可以先读 02 的第 1–2 节定下地址方案，再回到 01 开始装。
 
