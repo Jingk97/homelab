@@ -543,6 +543,20 @@ curl ... golang.google.cn/...             # 直连
 
 > 🟡 **yq 的下载改成了「用户态下载到 `/tmp` → `sudo install`」**，而不是 `sudo -E curl`。这样代理变量不用穿过 `sudo`，避开 sudo 的环境清空问题。
 
+> 🔴 **`uv` 有兜底路径**：官方 `astral.sh/uv/install.sh` 失败时，脚本会改从 GitHub Releases 直接拉预编译二进制装到 `~/.local/bin/`。两条路都失败才告警跳过。
+
+#### 一个变量命名的坑
+
+脚本里管 nvm 版本的变量**不能叫 `NVM_VERSION`**：
+
+```
+/home/jing/.nvm/nvm.sh: line 930: local: NVM_VERSION: readonly variable
+```
+
+`nvm.sh` 内部也用这个名字，我们在外层 `readonly NVM_VERSION=...` 之后，加载 nvm 时它的 `local NVM_VERSION` 就会报错。脚本里改用 `NVM_TAG`。
+
+> 这类"和被 source 的脚本抢变量名"的问题，**只有真跑一遍才会暴露** —— 语法检查和静态分析都发现不了。
+
 #### 起点必须是 Mac 上已有的代理
 
 不能指望先建 `vm-router`：

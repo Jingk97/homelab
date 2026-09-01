@@ -123,3 +123,14 @@ SKIP_LANG=1   ./provision-base.sh
 ### 网络失败的降级行为
 
 `yq`、`uv`、`nvm`、`Go` 这四项依赖外网下载。任何一项失败**只跳过该项并告警**，不会中断整个脚本 —— 其余配置照常完成，失败项可事后手动补装。
+
+其中两项有兜底路径：
+
+| 项 | 主路径 | 兜底 |
+|---|---|---|
+| **uv** | `astral.sh/uv/install.sh` | GitHub Releases 预编译二进制 → `~/.local/bin/` |
+| **Go** | `golang.google.cn`（直连） | `go.dev`（走代理） |
+
+### 🔴 已知的变量命名约束
+
+管 nvm 版本的变量**不能叫 `NVM_VERSION`** —— `nvm.sh` 内部也用这个名字，外层 `readonly` 之后加载 nvm 会报 `local: NVM_VERSION: readonly variable`。脚本里用的是 `NVM_TAG`。
