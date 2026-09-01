@@ -891,6 +891,8 @@ systemd 在启动早期就要读它，文件不存在会导致部分服务启动
 
 #### 用法
 
+[`scripts/sysprep.sh`](../scripts/sysprep.sh) 把上面这条顺序约束固化进流程，一次做完。
+
 ```bash
 # 🔴 执行前先在 Proxmox 网页上打快照 —— 本脚本不可逆
 cd homelab/scripts
