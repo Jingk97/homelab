@@ -478,16 +478,57 @@ chmod +x provision-base.sh
 
 | 环境变量 | 作用 |
 |---|---|
+| **`PROXY`** | 走代理执行，自动展开成 `http_proxy` / `https_proxy` / `no_proxy` |
 | `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
 | `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
 
 > **为什么不能用 root 跑**：`nvm` 和 `uv` 安装在**用户目录**（`~/.nvm`、`~/.local/bin`）。用 root 执行会装到 `/root` 下，普通用户完全用不了。脚本会检测并警告。
 
+### 5.2.1 🔴 代理：三个模块依赖境外网络
+
+脚本 8 个模块里，**5 个走国内镜像可直连，3 个依赖 GitHub**：
+
+| 模块 | 下载源 | 国内直连 |
+|---|---|---|
+| M1 apt / M5 pip / M7 npm 与 node 二进制 | 清华镜像 | 🟢 稳 |
+| M6 Go 二进制 | `golang.google.cn`（Go 官方中国站） | 🟢 稳 |
+| M6 GOPROXY | `goproxy.cn` | 🟢 稳 |
+| 🔴 **M4 yq** | `github.com/mikefarah/yq/releases` | 🔴 不稳 |
+| 🔴 **M5 uv** | `astral.sh` → GitHub releases | 🔴 不稳 |
+| 🔴 **M7 nvm** | `github.com/nvm-sh/nvm.git` | 🔴 不稳 |
+
+**M0 会先做连通性预检**，跑之前就告诉你 GitHub 通不通，而不是跑到 M4 才失败。不通时告警并让你选择是否继续（继续的话其余模块照常完成，三项失败的可事后补装）。
+
+**起点必须是 Mac 上已有的代理**（如 Surge），不能指望先建 `vm-router`：
+
+```
+建 vm-router 需要下载 mihomo / netbird  →  这两个也在 GitHub 上  →  需要代理
+```
+
+Mac 侧（Surge 为例）：开启「允许来自局域网的连接」，记下 HTTP 代理端口（默认 `6152`），并确认 `[General]` 里有局域网直连规则：
+
+```ini
+skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local
+```
+
+VM 侧先验证再跑：
+
+```bash
+export https_proxy=http://192.168.5.9:6152
+curl -I --connect-timeout 10 https://github.com && echo "代理 OK"
+
+PROXY=http://192.168.5.9:6152 ./provision-base.sh
+```
+
+> 🔴 **`sudo` 默认清空环境变量**，所以脚本内所有联网的 `sudo` 调用都用了 `sudo -E` 显式继承代理。这一点漏掉的话，即使设了代理，`sudo curl` 那行还是会直连 GitHub。
+>
+> 代理只在本次会话生效，**不写入任何持久化配置**。等 `vm-router` 建好后，代理角色由它接管，Surge 退回只服务 Mac 自己。
+
 ### 5.3 脚本做了什么
 
 | 模块 | 内容 | 关键说明 |
 |---|---|---|
-| **M0** 前置检查 | 拒绝 root 直跑、确认系统版本、确认 sudo 可用 | 见上方 |
+| **M0** 前置检查 | 拒绝 root 直跑、确认系统、确认 sudo、**显示代理、预检 GitHub 连通性** | 见 5.2.1 |
 | **M1** apt 源 + 更新 | 切清华镜像（**deb822 格式**）+ `full-upgrade` | Ubuntu 24.04 用 `.sources` 而非 `.list`，格式不同 |
 | **M2** 系统基础 | 时区 / NTP / DNS / journald / locale / sudo 免密 | 详见下表 |
 | **M3** 运维工具 | `htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux vim …` | |
@@ -537,15 +578,31 @@ curl -fsSL 'https://golang.google.cn/VERSION?m=text'
 
 ### 5.5 幂等性与网络降级
 
-**反复执行是安全的：**
+**反复执行是安全的，而且不做无谓的重启：**
 
 | 项 | 幂等方式 |
 |---|---|
 | apt 源 | 已是镜像源则跳过；首次替换会备份为 `ubuntu.sources.bak-<时间戳>` |
+| **系统配置** | 用 `write_if_changed` 比对内容，**只有内容真的变了才写盘并重启对应服务** |
+| 配置文件位置 | 全部写成独立 drop-in（`*.conf.d/`），**不修改主配置文件** |
 | Go | 比对已安装版本与官方最新版，相同则跳过 |
-| nvm / uv | 检测已安装则跳过 |
-| 系统配置 | 全部写成独立的 drop-in 文件（`*.conf.d/`），**不修改主配置文件** |
+| **Node** | 用 `nvm current` 判断 —— 见下方陷阱 |
+| uv / yq | 检测命令是否已存在 |
+| locale | 检测 `locale -a` 里是否已有目标 locale |
+| npm registry | 比对当前值，已是 npmmirror 则跳过 |
 | `~/.bashrc` | 检测到已有 `NVM_DIR` 则不重复追加 |
+
+> 🔴 **`nvm ls | grep 'lts/'` 是个陷阱**
+>
+> 即使一个 Node 版本都没装，`nvm ls` 也会列出 `lts/*`、`lts/argon`、`lts/jod` 等**远程别名**：
+>
+> ```
+> N/A
+> lts/* -> lts/jod (-> N/A)
+> lts/argon -> v4.9.1 (-> N/A)
+> ```
+>
+> grep 一定命中，会被误判成"已安装"从而**永远跳过安装**。必须用 `nvm current` —— 未安装时它返回 `none` 或 `N/A`，装了才返回 `v22.x.x`。
 
 **网络失败不会中断整个脚本：**
 

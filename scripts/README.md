@@ -34,13 +34,33 @@ cd homelab/scripts
 
 | 环境变量 | 作用 |
 |---|---|
+| **`PROXY`** | 走代理执行。自动展开成 `http_proxy` / `https_proxy` / `no_proxy` 三个标准变量 |
 | `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
 | `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
 
 ```bash
+PROXY=http://192.168.5.9:6152 ./provision-base.sh
 SKIP_MIRROR=1 ./provision-base.sh
 SKIP_LANG=1   ./provision-base.sh
 ```
+
+### 🔴 关于代理
+
+脚本里 **8 个模块有 3 处依赖境外网络**：
+
+| 依赖境外 | 下载源 |
+|---|---|
+| **M4 yq** | `github.com/mikefarah/yq/releases` |
+| **M5 uv** | `astral.sh` → GitHub releases |
+| **M7 nvm** | `github.com/nvm-sh/nvm.git` |
+
+其余全部走国内镜像（apt/pip/npm 清华、Go 用 `golang.google.cn`、GOPROXY 用 `goproxy.cn`），国内直连即可。
+
+**M0 会做连通性预检**：跑之前先测 GitHub 通不通，不通会明确告警并让你选择是否继续 —— 而不是跑到一半才失败。
+
+> **为什么必须用 `PROXY=` 而不是先 `export`**：`sudo` 默认会清空环境变量。脚本内所有需要联网的 `sudo` 调用都用了 `sudo -E` 显式继承，但你自己 `export` 之后再跑脚本，效果和 `PROXY=` 是一样的 —— `PROXY=` 只是少敲三行。
+
+代理只在本次会话生效，**不写入任何持久化配置**。
 
 ### 做了什么
 
@@ -48,7 +68,7 @@ SKIP_LANG=1   ./provision-base.sh
 
 | 模块 | 内容 |
 |---|---|
-| **M0** | 前置检查：拒绝 root 直跑、确认系统版本、确认 sudo 可用 |
+| **M0** | 前置检查：拒绝 root 直跑、确认系统版本、确认 sudo、**显示代理设置、预检 GitHub 连通性** |
 | **M1** | apt 源切清华镜像（deb822 格式）+ 系统全量更新 |
 | **M2** | 时区 / NTP 国内源 / DNS 兜底 / journald 限 500M / locale / sudo 免密 |
 | **M3** | 运维工具：htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux… |
@@ -68,13 +88,21 @@ SKIP_LANG=1   ./provision-base.sh
 
 ### 幂等性
 
-反复执行是安全的：
+反复执行是安全的，而且**不会做无谓的重启**：
 
-- apt 源：已是镜像源则跳过；首次替换会备份原文件为 `ubuntu.sources.bak-<时间戳>`
-- Go：比对已安装版本与官方最新版，相同则跳过
-- nvm / uv：检测已安装则跳过
-- 配置文件：全部用独立的 drop-in 文件（`*.conf.d/`），不修改主配置
-- `~/.bashrc`：检测到已有 `NVM_DIR` 则不重复追加
+| 项 | 幂等方式 |
+|---|---|
+| apt 源 | 已是镜像源则跳过；首次替换会备份为 `ubuntu.sources.bak-<时间戳>` |
+| **系统配置** | 用 `write_if_changed` 比对内容，**只有内容真的变了才写盘并重启对应服务** |
+| 配置文件位置 | 全部写成独立 drop-in（`*.conf.d/`），**不修改主配置文件** |
+| Go | 比对已安装版本与官方最新版，相同则跳过 |
+| **Node** | 用 `nvm current` 判断，**不能用 `nvm ls \| grep lts/`** —— 见下 |
+| uv / yq | 检测命令是否已存在 |
+| `~/.bashrc` | 检测到已有 `NVM_DIR` 则不重复追加 |
+| locale | 检测 `locale -a` 里是否已有目标 locale |
+| npm registry | 比对当前值，已是 npmmirror 则跳过 |
+
+> **`nvm ls | grep lts/` 是个陷阱**：即使一个 Node 版本都没装，`nvm ls` 也会列出 `lts/*`、`lts/argon` 等**远程别名**，grep 一定命中，会被误判成"已安装"从而跳过安装。必须用 `nvm current`（未安装时返回 `none`/`N/A`）。
 
 ### 网络失败的降级行为
 
