@@ -194,7 +194,7 @@ sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
 | 分组 | 内容 |
 |---|---|
 | 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / DNS / guest-agent |
-| 工具 | 运维工具、研发工具是否齐全，`yq` 是否装上 |
+| 工具 | 运维工具、研发工具是否齐全，`yq` 是否装上。**`fd` / `bat` 两个名字都认** —— Ubuntu 打包成 `fdfind` / `batcat`，本体在但软链没建成时会明确指出是软链的问题，而不是笼统报"缺" |
 | 语言运行时 | `python3` / `pipx` / **`uv`（含"只存在于 /root 下"的专门判断）** / `go` + `GOPROXY` / **`nvm` 目录属主** / `node` / `npm` registry |
 | 兜底 | 家目录下有无非日常用户属主的文件；`/root` 下有无残留 |
 
@@ -248,7 +248,7 @@ sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
 | 模块 | 内容 |
 |---|---|
 | **M0** | 前置检查 + **不可逆操作确认**（打印主机名 / IP / 虚拟化类型，要求输入 `sysprep`）；检测到物理机会红字告警 |
-| **M1** | 转模板前关键项体检：家目录属主、`/root` 残留、**SSH 公钥是否在**、sudo 免密、**磁盘是否支持 discard** |
+| **M1** | 转模板前关键项体检：家目录属主、`/root` 残留、**SSH 公钥是否在**、sudo 免密、**用户 SSH 私钥检测**、**磁盘是否支持 discard** |
 | **M2** | 通用软件补齐：`full-upgrade` + `qemu-guest-agent` / `cloud-init` / vim curl wget htop |
 | **M3** | 主机名改通用名，同步改 `/etc/hosts` |
 | **M4** | 网络改回 DHCP：备份 → 写入 → `chmod 600` → **只 generate 不 apply** |
@@ -257,7 +257,7 @@ sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
 | **M7** | `fstrim` 把已删除的块还给 LVM-Thin 池 |
 | **M8** | 结果报告 + 10 秒倒计时后关机（可 Ctrl+C 取消） |
 
-### 比手工清理多做的三件事
+### 比手工清理多做的四件事
 
 **① SSH 主机密钥的重建兜底**
 
@@ -278,6 +278,14 @@ sudo find /var/log -type f -exec truncate -s 0 {} \;
 # ✅ 排除 /var/log/journal（已由上一步的 vacuum 处理）
 sudo find /var/log -type f -not -path '/var/log/journal/*' -exec truncate -s 0 {} +
 ```
+
+**④ 用户 SSH 私钥检测（只告警不自动删）**
+
+`~/.ssh/` 下的**私钥**会被原样复制进每一台克隆机 —— 和主机密钥是同一类风险：一份私钥变成 N 份，任何一台被拿下，攻击者就能拿着这把钥匙去它能到的所有地方。
+
+但这**不能由脚本替你决定**，也可能是你**故意**放的（想让每台克隆机开箱就能拉私有仓库）。所以 M1 只做三件事：**列出文件、给出删除命令、在 M8 收尾时再提醒一次**（M1 的告警很容易被后面几百行输出淹掉）。
+
+识别按**文件内容**而不是文件名 —— 叫什么名字都可能是私钥，但私钥第一行一定是 `-----BEGIN ... PRIVATE KEY-----`。
 
 另外，`history -c` 在**非交互脚本里是空操作**（脚本是子进程，清不掉调用者会话的内存历史）。真正有效的是删 `~/.bash_history` 文件 —— bash 只在**正常 exit** 时回写该文件，而脚本最后是 `shutdown`（SIGTERM），所以不会被写回。
 
