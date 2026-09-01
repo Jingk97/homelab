@@ -193,7 +193,7 @@ sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
 
 | 分组 | 内容 |
 |---|---|
-| 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / DNS / guest-agent |
+| 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / **DNS（配置层 + 运行时两层）** / guest-agent |
 | 工具 | 运维工具、研发工具是否齐全，`yq` 是否装上。**`fd` / `bat` 两个名字都认** —— Ubuntu 打包成 `fdfind` / `batcat`，本体在但软链没建成时会明确指出是软链的问题，而不是笼统报"缺" |
 | 语言运行时 | `python3` / `pipx` / **`uv`（含"只存在于 /root 下"的专门判断）** / `go` + `GOPROXY` / **`nvm` 目录属主** / `node` / `npm` registry |
 | 兜底 | 家目录下有无非日常用户属主的文件；`/root` 下有无残留 |
@@ -205,6 +205,34 @@ sudo ls /root/.local/bin /root/.npmrc 2>/dev/null
 | `0` | 体检全部通过 |
 | `1` | 存在 FAIL 项 |
 | `2` | 参数错误 / 前置检查不通过 |
+
+### 🔴 一个已修的坑：不能用 `bash -lc` 探测用户环境
+
+脚本要以日常用户的身份去问"你这儿的 node 是哪个版本"。直觉写法是 `sudo -u jing -H bash -lc 'node --version'` —— **但这行不通**。
+
+`provision-base.sh` 把 nvm 初始化**追加在 `~/.bashrc` 里**，而 Ubuntu 默认的 `~/.bashrc` 开头第一段就是：
+
+```bash
+case $- in
+    *i*) ;;
+      *) return;;      # 非交互 shell 直接 return
+esac
+```
+
+`bash -lc` 是**非交互**的，执行到这里就返回了，后面的 nvm 初始化**永远读不到** —— 结果是明明装好的 node 被误判成"没有可用版本"。
+
+所以 `as_user()` 不指望登录流程，改成逐项显式加载：
+
+```bash
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+[ -r /etc/profile.d/golang.sh ] && . /etc/profile.d/golang.sh
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+```
+
+> **go 没有这个问题** —— 它的环境变量在 `/etc/profile.d/golang.sh`，login shell 本来就会读。只有写在 `~/.bashrc` 里的东西会被那道守卫拦掉。
+
+node 的检查还做了分流：**"根本没装"和"装了但 shell 里加载不到"是两种不同的故障，修法完全不同**，所以脚本会直接去看 `~/.nvm/versions/node/` 有没有版本目录，据此给出不同的提示。
 
 ### 安全约束
 

@@ -413,14 +413,22 @@ EOF
   #    datasource_list: [None]，意思是「不要去任何地方找配置」。
   #    这个模板在 Proxmox 上【读不到】Cloud-Init 标签页注入的配置盘 ——
   #    你会发现界面上填了用户名和 IP，开机后一点反应都没有。
-  local ds_files ds_none=0 f
-  ds_files="$(sudo grep -rls 'datasource_list' /etc/cloud/cloud.cfg.d/ 2>/dev/null || true)"
-  if [[ -n "$ds_files" ]]; then
-    while IFS= read -r f; do
-      [[ -n "$f" ]] || continue
-      sudo grep -Eqs 'datasource_list.*None' "$f" && ds_none=1
-    done <<< "$ds_files"
+  # cloud-init 按【文件名排序】合并 /etc/cloud/cloud.cfg.d/*，后面的覆盖前面的。
+  # 所以只有排序最靠后的那个 datasource_list 才是最终生效的值 ——
+  # 把所有含该字段的文件都列出来会引入噪音（比如 90_dpkg.cfg 里那个
+  # 本来就带 NoCloud，会被 99-installer.cfg 覆盖掉，跟它无关）。
+  local ds_win="" ds_line="" ds_none=0 f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    ds_win="$f"
+  done < <(sudo grep -rls 'datasource_list' /etc/cloud/cloud.cfg.d/ 2>/dev/null | sort || true)
+
+  if [[ -n "$ds_win" ]]; then
+    ds_line="$(sudo grep -h -m1 'datasource_list' "$ds_win" 2>/dev/null || true)"
+    # 只要最终值里没有 NoCloud / ConfigDrive，Proxmox 注入的配置盘就读不到
+    printf '%s' "$ds_line" | grep -qE 'NoCloud|ConfigDrive' || ds_none=1
   fi
+
   if [[ $ds_none -eq 1 ]]; then
     if [[ "$ENABLE_PVE_CLOUDINIT" == "1" ]]; then
       info "打开 Proxmox Cloud-Init 支持（ENABLE_PVE_CLOUDINIT=1）"
@@ -434,8 +442,10 @@ EOF
       fi
       done_ "已允许 NoCloud / ConfigDrive 数据源"
     else
-      warn "检测到 datasource_list 含 None（ISO 安装器写的）："
-      printf '%s\n' "$ds_files" | sed 's/^/          /'
+      warn "cloud-init 最终生效的数据源里没有 NoCloud / ConfigDrive："
+      warn "      文件  $ds_win"
+      warn "      内容  ${ds_line# }"
+      warn "  （这是 Ubuntu ISO 安装器 subiquity 写的，排序最后所以它说了算）"
       warn "  这意味着 Proxmox 网页「Cloud-Init」标签页填的配置【不会生效】"
       warn "  以后想用它自动配 IP/用户，重跑：ENABLE_PVE_CLOUDINIT=1 ./sysprep.sh"
     fi
@@ -514,14 +524,25 @@ m7_fstrim() {
 m8_report() {
   echo
   printf '\033[1;32m════════════════ 去身份化完成 ════════════════\033[0m\n'
-  printf '  %-16s %s\n' "主机名"      "$(hostname)"
-  printf '  %-16s %s\n' "machine-id"  "$([[ -s /etc/machine-id ]] && echo '🔴 非空（清理未生效）' || echo '空 ✓ 首次启动重新生成')"
+  # 🔴 dry-run 下什么都没做，机器当然还是原样。
+  #    这里如果照常打「machine-id 非空 / 主机密钥 6 个」，会被读成"清理失败"，
+  #    白白吓人一跳。空跑就明说是空跑。
   local hk=()
   shopt -s nullglob
   hk=(/etc/ssh/ssh_host_*)
   shopt -u nullglob
-  printf '  %-16s %s\n' "SSH 主机密钥" "${#hk[@]} 个（应为 0）"
-  printf '  %-16s %s\n' "网络"        "$([[ "$KEEP_STATIC_IP" == "1" ]] && echo '静态（保留）' || echo 'DHCP（下次开机生效）')"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  %-16s %s\n' "主机名"      "$(hostname)  → 将改为 $TMPL_HOSTNAME"
+    printf '  %-16s %s\n' "machine-id"  "未改动（--dry-run 空跑，当前 $( [[ -s /etc/machine-id ]] && echo 非空 || echo 空 )）"
+    printf '  %-16s %s\n' "SSH 主机密钥" "未改动（--dry-run 空跑，当前 ${#hk[@]} 个）"
+    printf '  %-16s %s\n' "网络"        "未改动（--dry-run 空跑）"
+  else
+    printf '  %-16s %s\n' "主机名"      "$(hostname)"
+    printf '  %-16s %s\n' "machine-id"  "$([[ -s /etc/machine-id ]] && echo '🔴 非空（清理未生效）' || echo '空 ✓ 首次启动重新生成')"
+    printf '  %-16s %s\n' "SSH 主机密钥" "${#hk[@]} 个（应为 0）"
+    printf '  %-16s %s\n' "网络"        "$([[ "$KEEP_STATIC_IP" == "1" ]] && echo '静态（保留）' || echo 'DHCP（下次开机生效）')"
+  fi
   printf '  %-16s %s\n' "根分区占用"  "$(df -h / | awk 'NR==2{print $3" / "$2}')"
   printf '  %-16s %s\n' "日志占用"    "$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[A-Z]' | head -1 || echo '-')"
   printf '\033[1;32m══════════════════════════════════════════════\033[0m\n'

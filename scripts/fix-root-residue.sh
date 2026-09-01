@@ -64,10 +64,27 @@ ok()   { printf '  \033[0;32m[ ✓ ]\033[0m %-24s %s\n' "$1" "${2:-}"; PASS_N=$(
 bad()  { printf '  \033[1;31m[ ✗ ]\033[0m %-24s %s\n' "$1" "${2:-}"; FAIL_N=$((FAIL_N + 1)); FAILED_ITEMS+=("$1 —— ${2:-}"); }
 soso() { printf '  \033[1;33m[ ! ]\033[0m %-24s %s\n' "$1" "${2:-}"; WARN_N=$((WARN_N + 1)); }
 
-# 以目标用户的【登录 shell】执行命令。
-# 必须带 -l：nvm / go / uv 的 PATH 都写在 ~/.bashrc 和 /etc/profile.d/ 里，
-# 不走登录流程就读不到，会把装好的东西误判成"未装"。
-as_user() { sudo -u "$TARGET_USER" -H bash -lc "$1" 2>/dev/null; }
+# 以目标用户身份执行命令，并【显式】加载 nvm / go / uv 的环境。
+#
+# 🔴 为什么不能用 `bash -lc` 靠登录流程自动加载：
+#   provision-base.sh 把 nvm 初始化【追加在 ~/.bashrc 里】，
+#   而 Ubuntu 默认的 ~/.bashrc 开头第一段就是：
+#
+#       case $- in *i*) ;; *) return;; esac    # 非交互 shell 直接 return
+#
+#   `bash -lc` 是【非交互】的，执行到这一行就返回了，后面的 nvm 初始化
+#   永远读不到 —— 结果是明明装好的 node 被误判成"没有可用版本"。
+#   （go 没这个问题，它在 /etc/profile.d/ 里，login shell 能读到。）
+#
+#   所以这里不指望登录流程，逐项显式加载。
+as_user() {
+  sudo -u "$TARGET_USER" -H bash -c '
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    [ -r /etc/profile.d/golang.sh ] && . /etc/profile.d/golang.sh
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    eval "$1"' _ "$1" 2>/dev/null
+}
 
 # 探测 uv 实际位置。不同版本官方安装脚本落点不同，
 # 只认一个路径会误判成"未安装"（与 provision-base.sh 的 uv_path 同逻辑）。
@@ -190,9 +207,13 @@ m1_scan() {
 # M2 · 清理（先确认，后动手）
 # ──────────────────────────────────────────────────────────────
 m2_clean() {
-  [[ ${#RESIDUE[@]} -gt 0 ]] || return 0
-
   step "M2 · 清理残留"
+
+  # 模块头无论如何都打印：输出里突然少一个 M2 会让人以为脚本挂了
+  if [[ ${#RESIDUE[@]} -eq 0 ]]; then
+    skip "无残留可清理"
+    return 0
+  fi
 
   if [[ "$MODE" == "dry-run" ]]; then
     skip "--dry-run，仅列清单不执行"
@@ -279,12 +300,20 @@ m3_check_system() {
     bad "sudo 免密" "未生效（/etc/sudoers.d/ 里的规则没写对？）"
   fi
 
-  # DNS 兜底
-  if resolvectl status 2>/dev/null | grep -qs 'DNS Servers'; then
-    ok "DNS" "$(resolvectl status 2>/dev/null | grep -m1 'DNS Servers' | sed 's/.*: //')"
-  else
-    soso "DNS" "无法读取 resolvectl 状态"
-  fi
+  # DNS 分两层看：
+  #   配置层  provision-base.sh 写的 systemd-resolved drop-in 还在不在
+  #   运行时  resolvectl 实际生效的服务器地址
+  # 只查 `resolvectl status | grep 'DNS Servers'` 不可靠 —— 不同版本的输出
+  # 措辞不一样（Current DNS Server / DNS Servers / 按 Link 分段），容易误报。
+  local dns_file="/etc/systemd/resolved.conf.d/10-cn-dns.conf"
+  [[ -f "$dns_file" ]] && ok "DNS 兜底配置" "$(grep -m1 '^DNS=' "$dns_file" 2>/dev/null || echo "$dns_file")" \
+    || bad "DNS 兜底配置" "缺 $dns_file"
+
+  local dns_rt
+  dns_rt="$( { resolvectl dns 2>/dev/null; resolvectl status 2>/dev/null; } \
+             | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u | paste -sd' ' - || true)"
+  [[ -n "$dns_rt" ]] && ok "DNS 运行时" "$dns_rt" \
+    || soso "DNS 运行时" "resolvectl 读不到（这台机器没用 systemd-resolved？）"
 
   # QEMU guest agent：不装的话 Proxmox 看不到 IP、「关机」按钮无响应
   if systemctl is-enabled --quiet qemu-guest-agent 2>/dev/null; then
@@ -391,8 +420,19 @@ m5_check_lang() {
     else
       ok "nvm 目录属主" "$TARGET_USER"
     fi
+    # 直接看 nvm 的版本目录，比依赖 shell 初始化可靠 ——
+    # 这样能把"根本没装"和"装了但 shell 里加载不到"区分开，
+    # 两者的修法完全不同（前者重跑 provision，后者查 ~/.bashrc）
+    local nvm_installed
+    nvm_installed="$(ls -1 "$TARGET_HOME/.nvm/versions/node" 2>/dev/null | tr '\n' ' ' || true)"
     v="$(as_user 'node --version' || true)"
-    [[ -n "$v" ]] && ok "node" "$v" || bad "node" "nvm 已装但没有可用的 Node 版本"
+    if [[ -n "$v" ]]; then
+      ok "node" "$v"
+    elif [[ -n "$nvm_installed" ]]; then
+      bad "node" "已装 ${nvm_installed% }，但 $TARGET_USER 的 shell 里加载不到（查 ~/.bashrc 的 nvm 段）"
+    else
+      bad "node" "nvm 已装但一个 Node 版本都没有"
+    fi
     v="$(as_user 'npm --version' || true)"
     [[ -n "$v" ]] && ok "npm" "$v" || soso "npm" "读不到版本"
     if as_user 'npm config get registry' 2>/dev/null | grep -qs 'npmmirror'; then

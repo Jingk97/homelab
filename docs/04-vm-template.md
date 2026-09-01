@@ -806,7 +806,7 @@ echo $?        # 0 = 全部通过；1 = 有 FAIL 项
 
 | 分组 | 项 |
 |---|---|
-| 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / DNS / guest-agent |
+| 系统基础 | 系统版本 / 时区 / NTP / **默认 target** / apt 镜像源 / journald 上限 / sudo 免密 / **DNS（配置层 + 运行时两层）** / guest-agent |
 | 工具 | 运维工具、研发工具是否齐全，`yq` 是否装上 |
 | 语言运行时 | `python3` / `pipx` / **`uv`（含"只在 /root 下"的专门判断）** / `go` + `GOPROXY` / **`nvm` 目录属主** / `node` / `npm` registry |
 | 兜底 | 家目录下有无非日常用户属主的文件；`/root` 下有无残留 |
@@ -814,6 +814,8 @@ echo $?        # 0 = 全部通过；1 = 有 FAIL 项
 **退出码就是验证信号**：`0` 全部通过，`1` 存在 FAIL 项，`2` 参数或前置检查不通过。
 
 > 脚本**拒绝以 root 执行** —— 那样体检的是 `/root` 而不是日常账号，恰恰查不出要查的问题。
+
+> 🔴 **探测用户环境不能用 `bash -lc`**：`provision-base.sh` 把 nvm 初始化追加在 `~/.bashrc`，而 Ubuntu 的 `~/.bashrc` 开头就有 `case $- in *i*) ;; *) return;; esac`（非交互 shell 直接 return）。`bash -lc` 是非交互的，走到这行就返回了，**装好的 node 会被误判成"没有可用版本"**。脚本改成显式 source `nvm.sh`，并用 `~/.nvm/versions/node/` 区分"根本没装"和"装了但加载不到"—— 这两种故障的修法完全不同。
 
 ---
 
