@@ -12,10 +12,15 @@
 #      （这三项按机器角色在克隆后单独处理，详见 docs/04-vm-template.md）
 #
 # 用法：
-#   ./provision-base.sh                                  # 全量执行
-#   PROXY=http://192.168.5.9:6152 ./provision-base.sh     # 走代理（推荐）
-#   SKIP_MIRROR=1 ./provision-base.sh                    # 跳过国内镜像源配置
-#   SKIP_LANG=1   ./provision-base.sh                    # 跳过语言运行时
+#   ./provision-base.sh                                   # 全量执行
+#   PROXY=http://192.168.5.9:6152 ./provision-base.sh      # 需要下载境外资源时
+#   SKIP_MIRROR=1 ./provision-base.sh                     # 跳过国内镜像源配置
+#   SKIP_LANG=1   ./provision-base.sh                     # 跳过语言运行时
+#
+# 关于代理：
+#   代理【只作用于境外目标】（GitHub / astral.sh / go.dev），
+#   国内镜像（清华 / golang.google.cn / npmmirror）一律直连。
+#   把国内源也塞进代理会导致镜像站返回 403 —— 因为出口 IP 变成了境外。
 #
 set -euo pipefail
 
@@ -31,16 +36,19 @@ readonly TS="$(date +%Y%m%d-%H%M%S)"
 SKIP_MIRROR="${SKIP_MIRROR:-0}"
 SKIP_LANG="${SKIP_LANG:-0}"
 
-# PROXY 是个便捷入口：设了它就自动展开成三个标准变量，
-# 免得每次手敲 export http_proxy / https_proxy / no_proxy
-if [[ -n "${PROXY:-}" ]]; then
-  export http_proxy="$PROXY"
-  export https_proxy="$PROXY"
-  export HTTP_PROXY="$PROXY"
-  export HTTPS_PROXY="$PROXY"
-  export no_proxy="localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local,.lan"
-  export NO_PROXY="$no_proxy"
-fi
+# ── 代理处理 ──────────────────────────────────────────────────
+# 关键设计：代理【不做全局导出】，只在访问境外目标的那几条命令上临时施加。
+#
+# 原因：国内镜像（清华 / golang.google.cn / npmmirror）走代理时，
+#       出口 IP 变成境外，镜像站会返回 403 Forbidden 直接失败。
+#
+# 如果调用者在环境里已经 export 过代理，这里把它【收编】进 PROXY_URL，
+# 然后从全局环境中清除 —— 否则 apt 会继承那些变量，照样踩 403。
+PROXY_URL="${PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}"
+PROXY_INHERITED=0
+[[ -z "${PROXY:-}" && -n "$PROXY_URL" ]] && PROXY_INHERITED=1
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+readonly PROXY_URL PROXY_INHERITED
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -51,6 +59,17 @@ step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m    [warn] %s\033[0m\n' "$*"; }
 skip() { printf '\033[0;36m    [skip] %s\033[0m\n' "$*"; }
+
+# 只对【境外目标】临时施加代理执行一条命令。
+# 变量只在这一条命令的环境里存在，不影响其他任何操作。
+with_proxy() {
+  if [[ -n "$PROXY_URL" ]]; then
+    http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" \
+    HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" "$@"
+  else
+    "$@"
+  fi
+}
 
 # 幂等写入：内容有变化才写盘并返回 0；无变化返回 1。
 # 调用方据此决定要不要重启服务 —— 避免每次执行都无谓地重启系统服务。
@@ -93,16 +112,27 @@ m0_precheck() {
   sudo -n true 2>/dev/null || sudo true
 
   # 4. 代理状态
-  if [[ -n "${https_proxy:-}" ]]; then
-    info "代理    ：${https_proxy}"
+  if [[ -n "$PROXY_URL" ]]; then
+    info "代理    ：${PROXY_URL}（仅用于境外目标，国内镜像直连）"
+    [[ "$PROXY_INHERITED" == "1" ]] && \
+      info "          （从环境变量继承，已从全局环境清除以免影响 apt）"
   else
     info "代理    ：未设置"
   fi
 
-  # 5. 连通性预检 —— 提前告知，而不是跑到一半才失败
+  # 5. 国内镜像连通性 —— 这些必须【直连】能通，走代理反而会 403
+  info "检测国内镜像连通性（直连）…"
+  if curl -fsS --connect-timeout 8 -o /dev/null "https://${MIRROR_HOST}/" 2>/dev/null; then
+    info "清华镜像：可达 ✓"
+  else
+    warn "清华镜像直连不通 —— apt / pip / node 下载会失败"
+    warn "检查一下机器的 DNS 和网关配置是否正常"
+  fi
+
+  # 6. 境外连通性预检 —— 提前告知，而不是跑到一半才失败
   #    这三项依赖 GitHub / astral.sh：yq、uv、nvm
-  info "检测外网连通性…"
-  if curl -fsS --connect-timeout 8 -o /dev/null https://github.com 2>/dev/null; then
+  info "检测境外连通性（${PROXY_URL:+经代理}${PROXY_URL:-直连}）…"
+  if with_proxy curl -fsS --connect-timeout 8 -o /dev/null https://github.com 2>/dev/null; then
     info "GitHub  ：可达 ✓"
   else
     warn "GitHub 不可达 —— yq / uv / nvm 三项将安装失败（其余模块不受影响）"
@@ -271,14 +301,17 @@ m4_dev_tools() {
   if command -v yq > /dev/null 2>&1; then
     skip "yq 已安装（$(yq --version 2>/dev/null | awk '{print $NF}')）"
   else
-    info "安装 yq"
-    if sudo -E curl -fsSL --connect-timeout 20 \
+    info "安装 yq（GitHub，走代理）"
+    # 先以【普通用户】下载到 /tmp 再 install 到系统目录：
+    # 这样代理变量不用穿过 sudo，避开 sudo 的环境清空问题
+    if with_proxy curl -fsSL --connect-timeout 20 \
          https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
-         -o /usr/local/bin/yq; then
-      sudo chmod +x /usr/local/bin/yq
+         -o /tmp/yq_linux_amd64; then
+      sudo install -m 0755 /tmp/yq_linux_amd64 /usr/local/bin/yq
+      rm -f /tmp/yq_linux_amd64
     else
       warn "yq 下载失败（GitHub 不可达？），跳过。可事后手动装。"
-      sudo rm -f /usr/local/bin/yq
+      rm -f /tmp/yq_linux_amd64
     fi
   fi
 
@@ -312,9 +345,17 @@ trusted-host = ${MIRROR_HOST}"; then
   if command -v uv > /dev/null 2>&1 || [[ -x "${TARGET_HOME}/.local/bin/uv" ]]; then
     skip "uv 已安装"
   else
-    info "安装 uv"
-    curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh \
-      || warn "uv 安装失败（网络问题），可事后手动装"
+    info "安装 uv（astral.sh + GitHub，走代理）"
+    # 用子 shell 限定代理作用域：安装脚本内部还会再下载二进制，
+    # 所以代理必须对整个管道生效，但不能泄漏到后续步骤
+    if [[ -n "$PROXY_URL" ]]; then
+      ( export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL"
+        curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh ) \
+        || warn "uv 安装失败，可事后手动装"
+    else
+      curl -LsSf --connect-timeout 20 https://astral.sh/uv/install.sh | sh \
+        || warn "uv 安装失败（网络问题），可事后手动装"
+    fi
   fi
 }
 
@@ -326,9 +367,11 @@ m6_golang() {
 
   # 不写死版本号：从官方接口拉当前最新稳定版，脚本永远不用改。
   # golang.google.cn 是 Go 官方的中国站点，国内可直连；失败回退 go.dev。
+  # golang.google.cn 是 Go 官方中国站点 —— 【直连】，不能走代理
   local want
   want="$(curl -fsSL --connect-timeout 15 'https://golang.google.cn/VERSION?m=text' 2>/dev/null | head -1 || true)"
-  [[ -z "$want" ]] && want="$(curl -fsSL --connect-timeout 15 'https://go.dev/VERSION?m=text' 2>/dev/null | head -1 || true)"
+  # 只有中国站点不通时才回退 go.dev，那时才需要代理
+  [[ -z "$want" ]] && want="$(with_proxy curl -fsSL --connect-timeout 15 'https://go.dev/VERSION?m=text' 2>/dev/null | head -1 || true)"
   if [[ -z "$want" ]]; then
     warn "无法获取 Go 最新版本号（网络问题），跳过 Go 安装"
     return 0
@@ -342,8 +385,10 @@ m6_golang() {
   else
     info "安装 Go $want（当前：${have:-未安装}）"
     local tgz="/tmp/${want}.linux-amd64.tar.gz"
+    # 同样：中国站点直连，失败才用代理回退 go.dev
     if ! curl -fsSL --connect-timeout 30 "https://golang.google.cn/dl/${want}.linux-amd64.tar.gz" -o "$tgz"; then
-      curl -fsSL --connect-timeout 30 "https://go.dev/dl/${want}.linux-amd64.tar.gz" -o "$tgz" \
+      warn "golang.google.cn 下载失败，回退 go.dev（走代理）"
+      with_proxy curl -fsSL --connect-timeout 30 "https://go.dev/dl/${want}.linux-amd64.tar.gz" -o "$tgz" \
         || { warn "Go 下载失败，跳过"; rm -f "$tgz"; return 0; }
     fi
     # 顺序说明：必须先删旧目录再解压，Go 官方明确要求。
@@ -384,10 +429,10 @@ m7_nodejs() {
   if [[ -s "${nvm_dir}/nvm.sh" ]]; then
     skip "nvm 已安装于 ${nvm_dir}"
   else
-    info "安装 nvm ${NVM_VERSION}"
+    info "安装 nvm ${NVM_VERSION}（GitHub，走代理）"
     # git clone 而不是 install.sh：报错更清楚，且方便以后切版本。
-    # git 会读取 http_proxy / https_proxy 环境变量，代理下可正常工作。
-    if ! git clone --depth 1 --branch "$NVM_VERSION" \
+    # git 会读取 http_proxy / https_proxy，with_proxy 把它们只喂给这一条命令。
+    if ! with_proxy git clone --depth 1 --branch "$NVM_VERSION" \
            https://github.com/nvm-sh/nvm.git "$nvm_dir" 2>/dev/null; then
       warn "nvm 下载失败（GitHub 不可达？），跳过 Node.js 安装"
       warn "可事后手动执行："
@@ -417,7 +462,7 @@ EOF
   . "${nvm_dir}/nvm.sh"
 
   if [[ "$SKIP_MIRROR" != "1" ]]; then
-    # 让 nvm 从国内镜像下载 Node 二进制
+    # Node 二进制从清华镜像下载 —— 【直连】，此处不能有代理变量
     export NVM_NODEJS_ORG_MIRROR="https://${MIRROR_HOST}/nodejs-release/"
   fi
 
@@ -485,9 +530,10 @@ m8_summary() {
   warn "  1. 不装 Docker —— 与 k8s 的 containerd 存在 cgroup driver 冲突"
   warn "  2. 不关 swap  —— k8s 节点需要关，其他角色保留更好"
   warn "  3. 不改 SSH 密码登录 —— 避免公钥未生效时把自己锁在门外"
-  if [[ -n "${PROXY:-}" ]]; then
+  if [[ -n "$PROXY_URL" ]]; then
     echo
-    info "本次通过代理 ${PROXY} 执行。代理只在本次会话生效，未写入任何持久化配置。"
+    info "本次代理 ${PROXY_URL} 仅用于 GitHub / astral.sh 等境外目标，"
+    info "国内镜像全程直连。代理未写入任何持久化配置。"
   fi
 }
 
