@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart TD
-    A["ISO 安装 Ubuntu<br/>静态 IP + hostname"] --> B["通用化配置<br/>qemu-guest-agent<br/>常用工具 / SSH 公钥 / 软件源"]
+    A["ISO 安装 Ubuntu<br/>静态 IP + hostname"] --> B["通用配置<br/>provision-base.sh<br/>系统基础 / 工具链 / 语言运行时"]
     B --> C["去身份化清理<br/>清空 machine-id<br/>删除 SSH 主机密钥<br/>网络改回 DHCP<br/>清日志 + fstrim"]
     C --> D["关机"]
     D --> E["转换成模板<br/>此操作不可逆"]
@@ -431,22 +431,164 @@ ssh jing@192.168.5.90
 
 ---
 
-## 5. 模板化
+## 5. 模板通用配置脚本
 
-### 5.1 核心概念：必须先"去身份化"
+系统装完之后、去身份化之前，跑一遍 [`scripts/provision-base.sh`](../scripts/provision-base.sh)，把**所有克隆机都需要**的东西一次配齐。
+
+### 5.1 边界：什么进模板，什么不进
+
+模板的价值在于**省掉重复劳动**，而不是"功能齐全"。判断标准只有一条：**是不是每台克隆机都要**。
+
+| ✅ 进模板 | 理由 |
+|---|---|
+| `qemu-guest-agent` | 不装的话 Proxmox 看不到 VM 的 IP、「关机」按钮无响应 |
+| SSH 公钥、sudo 免密 | 否则每台克隆都要重配一遍 |
+| 时区、NTP、DNS、journald 限制 | 系统级基础，每台都要 |
+| 运维/研发工具、语言运行时 | 开局第一件事都是装这些 |
+
+| ❌ 不进模板 | 理由 |
+|---|---|
+| **桌面环境（XFCE / xrdp）** | 7 台克隆里只有 2 台需要。让 5 台白背 500 MB 磁盘和一堆用不上的包 |
+| **业务软件**（Jellyfin、qBittorrent、数据库…） | 各机器角色不同 |
+| **Docker** | 见 5.4 |
+| `/etc/fstab` 的外接盘挂载 | 每台机器接的盘不一样 |
+
+> **一个反模式**：先装满所有软件，做模板时再卸载掉不需要的。
+> `apt remove` 会残留配置文件、数据目录、用户、systemd unit、apt 源和 GPG key；`apt purge` 也不删 `/var/lib/xxx`。
+> **最大的问题是你无法验证干净到什么程度** —— 半年后模板出问题，你会怀疑"是不是当初卸载没干净"，而这几乎没法排查。
+> **模板应该是「从来没装过」的状态，不是「装了又卸掉」的状态。**
+
+### 5.2 用法
+
+```bash
+# 在目标机器上，用【普通用户】执行，不要用 root
+cd homelab/scripts
+./provision-base.sh
+```
+
+或者直接从仓库拉：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Jingk97/homelab/main/scripts/provision-base.sh
+chmod +x provision-base.sh
+./provision-base.sh
+```
+
+**可选开关：**
+
+| 环境变量 | 作用 |
+|---|---|
+| `SKIP_MIRROR=1` | 跳过国内镜像源配置（apt / pip / npm / GOPROXY），全部用官方源 |
+| `SKIP_LANG=1` | 跳过语言运行时（Python 工具链 / Go / Node.js），只做系统配置和工具 |
+
+> **为什么不能用 root 跑**：`nvm` 和 `uv` 安装在**用户目录**（`~/.nvm`、`~/.local/bin`）。用 root 执行会装到 `/root` 下，普通用户完全用不了。脚本会检测并警告。
+
+### 5.3 脚本做了什么
+
+| 模块 | 内容 | 关键说明 |
+|---|---|---|
+| **M0** 前置检查 | 拒绝 root 直跑、确认系统版本、确认 sudo 可用 | 见上方 |
+| **M1** apt 源 + 更新 | 切清华镜像（**deb822 格式**）+ `full-upgrade` | Ubuntu 24.04 用 `.sources` 而非 `.list`，格式不同 |
+| **M2** 系统基础 | 时区 / NTP / DNS / journald / locale / sudo 免密 | 详见下表 |
+| **M3** 运维工具 | `htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux vim …` | |
+| **M4** 研发工具 | `git build-essential jq ripgrep fd bat yq` | Ubuntu 把 `bat`/`fd` 打包成 `batcat`/`fdfind`，脚本建了软链恢复常用名 |
+| **M5** Python | 系统 `python3` + `venv` + `pipx` + **`uv`** | 见下方说明 |
+| **M6** Go | **动态拉官方最新稳定版**到 `/usr/local/go` | 不写死版本号 |
+| **M7** Node.js | **nvm** + 最新 LTS | 用户级安装，以后能随时切版本 |
+| **M8** 收尾 | 清 apt 缓存 + 打印版本汇总 | |
+
+**M2 的六项分别解决什么：**
+
+| 项 | 配置 | 不做的后果 |
+|---|---|---|
+| 时区 | `Asia/Shanghai` | 日志时间全是 UTC，排查时要心算 +8 |
+| **NTP** | 阿里云 + `cn.pool.ntp.org` | 🔴 **时钟漂移会导致 k8s 证书验证失败、TLS 握手失败** |
+| **DNS** | `223.5.5.5` / `119.29.29.29` 兜底 | 这是**全局兜底**，DHCP 下发的 DNS 优先级更高，不会覆盖 netplan 的设置 |
+| **journald** | `SystemMaxUse=500M` | 🔴 默认无上限，跑久了能吃掉几个 GB，32 G 磁盘上很要命 |
+| locale | 系统 `en_US.UTF-8` + 生成 `zh_CN.UTF-8` | 系统保持英文让**报错能搜到答案**；同时保证中文文件名/网页正常显示 |
+| sudo 免密 | `NOPASSWD:ALL` | 脚本会用 `visudo -c` 校验语法 —— 写坏 sudoers 会导致完全无法提权 |
+
+**M5 为什么不直接 `pip install`：**
+
+Ubuntu 24.04 起启用了 **PEP 668** 保护，`pip install` 到系统 Python 会被直接拒绝。所以脚本装的是：
+
+- `pipx` —— 隔离安装命令行工具（每个工具一个独立虚拟环境）
+- `uv` —— Astral 的现代 Python 工具链，比 pip 快一到两个数量级，能自己下载和管理多个 Python 版本，不污染系统 Python
+
+**M6 为什么动态取版本号：**
+
+```bash
+curl -fsSL 'https://golang.google.cn/VERSION?m=text'
+```
+
+写死版本号的脚本半年后就过期了。用官方接口取最新稳定版，脚本永远不用改。`golang.google.cn` 是 Go 官方的中国站点，国内可直连；失败时自动回退到 `go.dev`。
+
+> **解压前必须先 `rm -rf /usr/local/go`** —— Go 官方明确要求。不删直接覆盖会让新旧版本文件混在一起，出现极难排查的编译错误。脚本里这个顺序不能调换。
+
+### 5.4 🔴 脚本刻意不做的三件事
+
+| 不做 | 原因 | 谁需要 |
+|---|---|---|
+| **不装 Docker** | 🔴 Docker 和 k8s 用的 containerd 存在 **cgroup driver 冲突**，是经典排查陷阱。而且 7 台克隆里只有开发机需要 | 需要的机器克隆后单独装 |
+| **不关 swap** | k8s 节点**必须关**（kubelet 默认拒绝在开启 swap 的节点启动），但媒体机 / 开发机保留 swap 更好 | 见 [8.1](#81-必须关闭-swap) |
+| **不改 SSH 密码登录** | 🔴 模板里禁用密码登录，万一克隆后公钥没生效，就把自己**锁在门外**了 | 克隆后确认密钥可用再关 |
+
+> 这三项的共同点：**它们的正确取值取决于机器角色**。放进模板等于替所有克隆做了决定，而其中大部分决定是错的。
+
+### 5.5 幂等性与网络降级
+
+**反复执行是安全的：**
+
+| 项 | 幂等方式 |
+|---|---|
+| apt 源 | 已是镜像源则跳过；首次替换会备份为 `ubuntu.sources.bak-<时间戳>` |
+| Go | 比对已安装版本与官方最新版，相同则跳过 |
+| nvm / uv | 检测已安装则跳过 |
+| 系统配置 | 全部写成独立的 drop-in 文件（`*.conf.d/`），**不修改主配置文件** |
+| `~/.bashrc` | 检测到已有 `NVM_DIR` 则不重复追加 |
+
+**网络失败不会中断整个脚本：**
+
+`yq`、`uv`、`nvm`、`Go` 这四项依赖外网下载。任何一项失败**只跳过该项并告警**，其余配置照常完成，失败项可事后手动补装。
+
+### 5.6 验证
+
+脚本结尾会自动打印版本汇总。也可以手动确认：
+
+```bash
+# 重新加载环境变量
+source ~/.bashrc && source /etc/profile.d/golang.sh
+
+# 系统基础
+timedatectl                          # 时区 Asia/Shanghai，NTP synchronized: yes
+resolvectl status | grep -A2 'DNS Servers'
+journalctl --disk-usage              # 应该在 500M 以内
+sudo -n true && echo "sudo 免密 OK"
+
+# 语言运行时
+python3 --version && uv --version && pipx --version
+go version && go env GOPROXY
+node --version && npm --version && npm config get registry
+```
+
+---
+
+## 6. 模板化
+
+### 6.1 核心概念：必须先"去身份化"
 
 克隆出来的虚拟机会**原样继承模板里的一切**，包括那些本该每台唯一的东西。不清理的话，你会得到一堆"长得一模一样"的机器，然后遇到极其难查的问题。
 
 | # | 内容 | 不清理的后果 |
 |---|---|---|
-| 1 | **`/etc/machine-id`** | 见 5.2，**最坑的一个** |
+| 1 | **`/etc/machine-id`** | 见 6.2，**最坑的一个** |
 | 2 | **SSH 主机密钥** | 所有克隆机指纹相同 → SSH 警告 + 中间人攻击风险 |
 | 3 | hostname | 全都同名，日志和监控里分不清谁是谁 |
 | 4 | **静态 IP** | 全都是同一个地址 → 一开机就 IP 冲突 |
 | 5 | 日志 / apt 缓存 / bash 历史 | 模板体积膨胀，每台克隆机都带一份垃圾 |
 | 6 | cloud-init 状态 | 首次启动逻辑不会重新执行 |
 
-### 5.2 为什么 machine-id 是重点
+### 6.2 为什么 machine-id 是重点
 
 这是一个 32 位十六进制字符串，systemd 在首次启动时生成，**本该全世界唯一**。
 
@@ -467,7 +609,7 @@ sudo truncate -s 0 /etc/machine-id   # 正确：清空但保留文件
 
 systemd 在启动早期就要读它，文件不存在会导致部分服务启动异常。**文件存在但内容为空** → systemd 首次启动时检测到这个状态，自动生成一个新的。
 
-### 5.3 模板里应该装什么
+### 6.3 模板里应该装什么
 
 | 应该装 | 理由 |
 |---|---|
@@ -483,7 +625,7 @@ systemd 在启动早期就要读它，文件不存在会导致部分服务启动
 | 绑定主机名的服务 | k8s、数据库等要在克隆后单独初始化 |
 | 任何已生成唯一标识的软件 | 比如已经 join 过集群的 kubelet |
 
-### 5.4 清理脚本
+### 6.4 去身份化清理脚本
 
 在**要转成模板的那台虚拟机里**执行：
 
@@ -547,7 +689,7 @@ sudo netplan apply
 
 克隆出来的机器先用 DHCP 拿个临时地址进得去，再手动改成规划的静态 IP。这比"克隆出来就冲突、进都进不去"好得多。
 
-### 5.5 转换成模板
+### 6.5 转换成模板
 
 ```
 关机后 → 右键虚拟机 → 转换成模板 (Convert to template)
@@ -566,7 +708,7 @@ sudo netplan apply
 VMID:  9000              ← 模板用 9000+ 编号，和实际虚拟机分开
 ```
 
-### 5.6 克隆
+### 6.6 克隆
 
 ```
 右键模板 → 克隆 (Clone)
@@ -587,7 +729,7 @@ VMID:  9000              ← 模板用 9000+ 编号，和实际虚拟机分开
 
 **建议用完整克隆。** thin provisioning 本身已经很省空间了，不值得为省一点空间换来"模板成了单点依赖"。
 
-### 5.7 克隆之后的三步
+### 6.7 克隆之后的三步
 
 ```bash
 # ① 改主机名
@@ -625,7 +767,7 @@ sudo reboot
 
 ---
 
-## 6. 进阶：Cloud-Init 模板
+## 7. 进阶：Cloud-Init 模板
 
 上面这套"克隆后手动改 hostname 和 IP"，建三五台还行，建十几台会烦。
 
@@ -642,11 +784,11 @@ sudo reboot
 
 ---
 
-## 7. k8s 节点的额外准备
+## 8. k8s 节点的额外准备
 
 以后用这个模板建 k8s 节点时，克隆后还要多做两步。
 
-### 7.1 必须关闭 swap
+### 8.1 必须关闭 swap
 
 Ubuntu 现在默认用 **swapfile**（`/swap.img`）而不是 swap 分区。
 
@@ -659,7 +801,7 @@ sudo rm -f /swap.img                       # 释放空间
 free -h                                    # Swap 那一行应该全是 0
 ```
 
-### 7.2 容器镜像的空间
+### 8.2 容器镜像的空间
 
 `/var/lib/containerd` 会存所有拉取的容器镜像，跑 AI 相关镜像时膨胀很快（CUDA 基础镜像动辄 5–10GB）。
 
@@ -670,7 +812,7 @@ free -h                                    # Swap 那一行应该全是 0
 
 ---
 
-## 8. 操作清单
+## 9. 操作清单
 
 ### 建第一台虚拟机
 
@@ -689,18 +831,30 @@ free -h                                    # Swap 那一行应该全是 0
      Ubuntu Pro：Skip for now
      勾选 Install OpenSSH server，snaps 一个不选
 □ 点 Reboot Now（此时不要卸载 ISO）
-□ 装 qemu-guest-agent + full-upgrade
 □ 从另一台机器 SSH 验证
+```
+
+### 跑通用配置脚本
+
+```
+□ Web 界面：引导顺序只留 scsi0，卸掉 CD/DVD 的 ISO，重启使其生效
+□ 打快照 01-clean（不勾「包含内存」）
+□ Mac 上 ssh-copy-id，把公钥推进去
+□ cd homelab/scripts && ./provision-base.sh      🔴 用普通用户，不要 root
+□ 按 5.6 逐条验证（时区 / NTP / DNS / 日志上限 / 各语言版本）
+□ 打快照 02-base
 ```
 
 ### 转成模板
 
 ```
-□ 跑清理脚本（重点：machine-id、SSH 主机密钥、fstrim）
+□ 跑去身份化清理脚本（6.4 节，重点：machine-id、SSH 主机密钥、fstrim）
 □ 网络改回 DHCP
 □ 关机
-□ 改名 tmpl-ubuntu-2404，VMID 改成 9000（可选但推荐）
+□ 🔴 删掉所有快照（带快照转模板会让后续克隆行为受限）
+□ 改名 tmpl-ubuntu-2404
 □ 右键 → 转换成模板
+□ 开启「保护」防误删
 □ 克隆一台出来验证：machine-id 是新的、能改 IP、能 SSH
 ```
 
@@ -708,7 +862,7 @@ free -h                                    # Swap 那一行应该全是 0
 
 ---
 
-## 9. 排障速查
+## 10. 排障速查
 
 | 现象 | 根因 | 解决 |
 |---|---|---|
