@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────
+# mihomo 配置模板
+#
+# 渲染：占位符 ${MIHOMO_SECRET} 由 mihomo.local.env 提供
+# 部署：/etc/mihomo/config.yaml，权限 600
+# 校验：sudo mihomo -t -d /etc/mihomo
+#
+# 🔴 当前处于【最小验证】阶段：不接管任何流量。
+#    TUN / DNS / 节点 / 分流规则的设计见同目录 README.md
+# ─────────────────────────────────────────────────────────────
+
+mixed-port: 7890          # HTTP 与 SOCKS5 共用一个端口
+allow-lan: true           # 允许局域网其他机器连过来 —— 旁路由必须开
+bind-address: '*'
+mode: rule
+log-level: info
+
+# RESTful 控制接口。热重载与 Web 面板都靠它
+external-controller: 0.0.0.0:9090
+# 🔴 必须设。不设的话局域网内任何人都能改代理配置、看全部连接
+secret: "${MIHOMO_SECRET}"
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,DIRECT

@@ -1,0 +1,4 @@
+# 本地机密与节点文件一律不进 git
+*.local.env
+providers/
+config.yaml
