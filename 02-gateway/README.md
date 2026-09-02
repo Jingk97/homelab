@@ -6,9 +6,9 @@
 |---|---|
 | **本文** | 部署记录 · 运维 · 踩坑 |
 | [**原理**](principles.md) | 策略组 / 规则 / mode / TUN / fake-ip / Geo 数据库的机制 |
-| [**配置**](config/) | 配置各段说明 · 演进路线 · 机密管理 |
+| [**配置**](config/) | 策略组结构 · AI 规则 · 各段取舍依据 · 机密管理 |
 
-> **状态**：🚧 已完成安装、订阅接入、分流验证；TUN / DNS / 全局切换未做
+> **状态**：🚧 已完成安装、订阅接入、AI 独立线路、分流验证；TUN / DNS / 全局切换未做
 
 ---
 
@@ -23,6 +23,61 @@
 | 面板 | metacubexd v1.273.0 @ `http://vm-router:9090/ui` |
 
 它做两件事：**出站分流**（海外走代理、国内直连）与**入站回家**（在外面访问家里服务）。合在一台机器上 —— 两者都是网络层工作，且从外面回家后还想用分流，同一台机器上是一条路由规则，分两台要做策略路由。
+
+---
+
+## 流量路由逻辑
+
+```mermaid
+flowchart TD
+    C["客户端流量"] --> R["规则表<br/>顺序匹配，第一条命中即停"]
+    R --> R1{"① 是 AI 域名吗<br/>90 条规则，最高优先级"}
+    R1 -->|"是"| AI["AI服务 · fallback"]
+    R1 -->|"否"| R2{"② 是国内吗<br/>GEOSITE,cn / GEOIP,CN"}
+    R2 -->|"是"| D["DIRECT<br/>家里电信 IP 直连"]
+    R2 -->|"否"| R3["③ MATCH 兜底"]
+    R3 --> P["PROXY · select<br/>43 个候选"]
+
+    AI --> A1{"自建线路健康"}
+    A1 -->|"是"| SELF["自建线路 · fallback"]
+    A1 -->|"否"| RJ1["REJECT<br/>连接立刻被拒"]
+
+    P -->|"默认"| SF["订阅兜底 · fallback"]
+    P -.->|"面板可手动固定"| MAN["39 节点 / 自建线路 / DIRECT"]
+
+    SF --> S1{"订阅线路健康"}
+    S1 -->|"是"| SUB["订阅线路 · fallback<br/>39 节点按顺序取第一个健康的"]
+    S1 -->|"否"| S2{"自建线路健康"}
+    S2 -->|"是"| SELF
+    S2 -->|"否"| RJ2["REJECT"]
+
+    SELF --> T1{"Trojan 健康"}
+    T1 -->|"是"| TN["Trojan-3xUI :9444"]
+    T1 -->|"否"| VN["VMess-3xUI :9445"]
+
+    AI -.->|"🔴 结构上不可能连到"| SUB
+```
+
+### 三条降级链
+
+```
+AI 域名   →  自建线路(Trojan → VMess)  →  REJECT
+其余流量  →  订阅线路(39 节点顺序切)   →  自建线路(Trojan → VMess)  →  REJECT
+国内域名  →  DIRECT
+```
+
+### 两个贯穿全局的设计决定
+
+| 决定 | 理由 |
+|---|---|
+| **全部用 `fallback`，一个 `url-test` 都没有** | `url-test` 每 300 秒按延迟重选，**出口 IP 频繁变动会触发服务端风控**。`fallback` 只在当前节点不健康时才切，健康时 IP 稳定 |
+| **两条链都以 `REJECT` 收尾，不退回 `DIRECT`** | `REJECT` 让连接**立刻被拒**，故障马上可见；退回 `DIRECT` 会变成"能上网但没代理"的**隐性故障**，察觉不到 |
+
+### AI 隔离是结构性的，不是靠规则约束
+
+`AI服务` 的候选只有 `[自建线路, REJECT]` —— **没有任何订阅节点，也没有 `DIRECT`**。即使规则写错、即使手动误操作，也不可能把 AI 流量送到订阅节点上。
+
+原因：AI 服务对**出口 IP 纯净度**敏感。共享节点上的其他用户行为会连累你的账号，表现为验证码变多、限流、乃至封号。
 
 ---
 
@@ -170,13 +225,25 @@ sudo tar -xzf /tmp/ui.tgz -C /etc/mihomo/ui
 ### 实测结果
 
 ```
-provider     airport-a 39 个节点
-策略组       PROXY(Selector) 41 候选 → 自动选择
-             自动选择(URLTest) 39 候选 → 延迟最低者
-国内域名     myip.ipip.net 经代理 → 36.106.203.193 中国天津电信   走 DIRECT ✅
-海外域名     ipinfo.io    经代理 → 185.220.238.132 JP/Tokyo      走节点   ✅
-连接链路     PROXY <- 自动选择 <- [Lv3·1.8x] 日本01
+策略组
+  AI服务     fallback   自建线路 → REJECT
+  自建线路   fallback   Trojan-3xUI(726ms) → VMess-3xUI(1433ms)
+  订阅线路   fallback   39 节点按顺序
+  订阅兜底   fallback   订阅线路 → 自建线路 → REJECT
+  PROXY     select     43 候选，默认订阅兜底
+
+连接链路实测
+  huggingface.co      DomainSuffix    AI服务 <- 自建线路 <- Trojan-3xUI
+  www.youtube.com     Match           PROXY <- 订阅兜底 <- 订阅线路 <- 香港01
+  mirrors.aliyun.com                  DIRECT
+  api.openai.com      HTTP 401        OpenAI 正常响应，请求确实到达
+
+出口 IP
+  国内域名   myip.ipip.net 经代理 → 36.106.203.193 中国天津电信   走 DIRECT
+  海外域名   ipinfo.io    经代理 → 185.220.238.132 JP/Tokyo      走节点
 ```
+
+> `chatgpt.com` / `claude.ai` 用 `curl` 测会返回 **403** —— 那是 Cloudflare 的机器人挑战要求浏览器指纹，不是链路问题。浏览器访问正常。
 
 ---
 

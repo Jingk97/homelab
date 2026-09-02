@@ -117,58 +117,131 @@ geox-url:
 
 按需下载：只有规则实际用到的库才会拉。当前用了 `GEOSITE` + `GEOIP`，所以下了前两个。
 
-### 节点来源
+### 节点来源：订阅 + 自建，并存
 
 ```yaml
+# 手工定义的自建节点，与订阅互不干扰
+proxies:
+  - name: Trojan-3xUI
+    type: trojan
+    server: ${SELF_SERVER}
+    port: 9444
+    password: ${SELF_TROJAN_PASSWORD}
+    sni: ${SELF_SERVER}
+    udp: true
+
+  - name: VMess-3xUI
+    type: vmess
+    server: ${SELF_SERVER}
+    port: 9445
+    uuid: ${SELF_VMESS_UUID}
+    alterId: 0            # Surge 的 vmess-aead=true 对应 alterId: 0
+    cipher: auto
+    tls: true
+    servername: ${SELF_SERVER}
+    udp: true
+
+# 订阅
 proxy-providers:
   airport-a:
     type: http
     url: "${SUB_URL_A}"
-    path: ./providers/airport-a.yaml    # 相对 -d 目录
+    path: ./providers/airport-a.yaml
     interval: 86400
-    health-check:
-      enable: true                      # url-test 组必须有它
-      url: https://www.gstatic.com/generate_204
-      interval: 300
+    health-check: { enable: true, url: https://www.gstatic.com/generate_204, interval: 300 }
 ```
 
-**拉取失败时继续用旧缓存**，只记 warning —— 订阅出问题不会导致 mihomo 起不来。这与"整份 config.yaml 被外部工具覆盖"是完全不同的风险级别。
+`proxies:`（手工）与 `proxy-providers:`（订阅）**可以并存**。支持的类型还包括 `http` / `socks5` —— **任何一个普通代理都能当节点用**。
 
-`type: file` 用于本地节点文件（自建节点、手工维护的列表）。格式判断：
+Surge → Clash 的字段映射要点：`password=` → `password`、`username=`(vmess) → `uuid`、`vmess-aead=true` → `alterId: 0`、`sni=` → trojan 用 `sni` / vmess 用 `servername`。
 
-```bash
-grep -c '^proxies:' <文件>      # 1 = Clash 格式可直接用，0 = 需转换
+> provider 拉取失败时**继续用旧缓存**，只记 warning —— 订阅出问题不会导致 mihomo 起不来。这与"整份 config.yaml 被覆盖"是完全不同的风险级别。
+
+### 策略组：7 个，全部 fallback（除 PROXY）
+
+| 组 | 类型 | 候选链 | 职责 |
+|---|---|---|---|
+| `自建线路` | `fallback` | Trojan-3xUI → VMess-3xUI | 协议级冗余。**同一台 VPS 两个端口** —— 能防单协议被识别阻断，防不了服务器宕机 |
+| **`AI服务`** | `fallback` | 自建线路 → **REJECT** | 🔴 候选里**没有任何订阅节点，也没有 DIRECT** |
+| `订阅线路` | `fallback` | 订阅 39 节点 | 按 provider 顺序取第一个健康的 |
+| `订阅兜底` | `fallback` | 订阅线路 → 自建线路 → **REJECT** | 订阅全挂转自建，自建也挂就拒绝 |
+| **`PROXY`** | `select` | 订阅兜底 / 订阅线路 / 自建线路 / DIRECT / 39 节点 | 通用流量落点，**43 个候选可手动固定** |
+
+#### 🔴 为什么全用 `fallback`，一个 `url-test` 都没有
+
+| 类型 | 切换时机 | 后果 |
+|---|---|---|
+| `url-test` | **每 300 秒按延迟重选** | 出口 IP 频繁变动 → **触发服务端风控**（验证码变多、要求重新登录） |
+| **`fallback`** | **只在当前节点不健康时** | 健康时一直用同一个，**出口 IP 稳定** |
+
+#### 🔴 为什么两条链都以 `REJECT` 收尾，不退回 `DIRECT`
+
+```
+REJECT   连接立刻被拒 → 浏览器马上报错 → 你立即知道出问题了
+DIRECT   能上网但没代理 → 海外站点变慢/打不开 → 隐性故障，察觉不到
 ```
 
-### 策略组
+同一原则也体现在路由器的**备用 DNS 留空**上：**宁可显性失败，不要隐性劣化**。
 
-```yaml
-proxy-groups:
-  - name: PROXY
-    type: select
-    proxies: [自动选择, DIRECT]
-    use: [airport-a]              # 39 个节点全部列为候选 → 共 41 个
+#### 🔴 AI 隔离是结构性的
 
-  - name: 自动选择
-    type: url-test
-    use: [airport-a]
-    url: https://www.gstatic.com/generate_204
-    interval: 300
-    tolerance: 50                 # 延迟差 50ms 内不切换，避免来回抖动
+`AI服务` 的候选只有 `[自建线路, REJECT]`。即使规则写错、即使手动误操作，**结构上不可能**把 AI 流量送到订阅节点。
+
+原因：AI 服务对**出口 IP 纯净度**敏感 —— 共享节点上其他用户的行为会连累你的账号，表现为验证码变多、限流、乃至封号。
+
+#### `select` 与 `fallback` 套两层的收益
+
+```
+fallback  自动切换，但【不能手动选】
+select    能手动选，但【不会自动切换】
 ```
 
-分两层的收益见[原理 · 策略组](../principles.md#2-策略组)：**规则与节点解耦** + **`DIRECT` 作为逃生开关**。
+`PROXY` 用 `select` 且默认指向 `订阅兜底`（fallback）——**默认自动兜底，需要时随时手动固定**。
 
 ### 规则
 
 ```yaml
 rules:
-  - GEOSITE,cn,DIRECT     # 域名维度，不需解析，快且准
-  - GEOIP,CN,DIRECT       # IP 维度兜底，允许解析
-  - MATCH,PROXY           # 兜底，必须最后
+  # ① AI 服务，90 条，最高优先级
+  - DOMAIN-SUFFIX,openai.com,AI服务
+  - DOMAIN-SUFFIX,chatgpt.com,AI服务
+  - DOMAIN-SUFFIX,anthropic.com,AI服务
+  - DOMAIN-SUFFIX,claude.ai,AI服务
+  ...                                # 共 90 条
+
+  # ② 国内直连
+  - GEOSITE,cn,DIRECT
+  - GEOIP,CN,DIRECT
+
+  # ③ 兜底
+  - MATCH,PROXY
 ```
 
-🔴 **`GEOSITE` 必须在 `GEOIP` 前面**，且 **`GEOIP` 不能加 `no-resolve`** —— 加了会导致带域名的连接跳过该规则，国内流量全部落到 `MATCH` 走代理。实测踩过，详见[原理 · 规则](../principles.md#3-规则)。
+#### AI 规则的来源与范围
+
+| 来源 | 条数 | 说明 |
+|---|---|---|
+| Surge `rules-main.dconf` 的 ChatGPT / claude 两段 | **59**（原 62 去重 3） | 原样迁移 |
+| 补充的常见 AI 服务 | **31** | 见下 |
+
+**故意保留了第三方服务**（`sentry.io` `stripe.com` `intercom.io` `auth0.com` `arkoselabs.com` 等）：
+
+- **验证码与认证域名必须和主域名同出口** —— 不同 IP 会触发风控
+- 遥测流量本身很小，隔离的收益不抵拆分的漏配风险
+
+**补充的 31 条**中最关键的是 **`chatgpt.com`** —— 原列表只有 `openai.com`，而 **OpenAI 2024 年已把主站迁到 `chatgpt.com`**。另补 `sora.com`、Google AI（`gemini.google.com` / `aistudio.google.com`）、Copilot、Cursor、Grok、Perplexity、HuggingFace、ElevenLabs 等。
+
+🟡 **国内 AI 刻意不加**（DeepSeek / Kimi / 智谱等）—— 本就该直连，走代理反而慢且可能被风控。
+
+#### 🔴 规则顺序的三条硬约束
+
+| 约束 | 违反的后果 |
+|---|---|
+| AI 规则在最前 | 被 `GEOSITE,cn` 或 `MATCH` 抢先命中 |
+| `GEOSITE` 在 `GEOIP` 前 | HTTP 代理请求携带的是域名，此时还没有 IP。GEOSITE 不需解析，快且准 |
+| `MATCH` 必须最后 | 它匹配一切，放前面后续规则全是死代码 |
+
+**`GEOIP` 不能加 `no-resolve`** —— 加了会导致带域名的连接跳过该规则，国内流量全部落到 `MATCH` 走代理。实测踩过：`www.qq.com` 走了日本节点。详见[原理 · 规则](../principles.md#3-规则)。
 
 ---
 
