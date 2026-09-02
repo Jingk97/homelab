@@ -45,6 +45,82 @@ geox-url:
   geosite: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
   asn:     "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
 
+# ── TUN：接管流量的核心 ───────────────────────────────────
+tun:
+  enable: true
+  # mixed = TCP 走内核栈（快）+ UDP 走 gvisor（兼容好）。
+  # 二进制启动日志里的 "Use tags: with_gvisor" 说明支持这个栈。
+  stack: mixed
+  device: mihomo-tun
+  # 改本机路由表，接管【本机自己发出的】流量（OUTPUT 链）
+  auto-route: true
+  # 🔴 写 nftables 规则，接管【转发流量】（FORWARD 链）——
+  #    旁路由能成立全靠它。别的机器把网关指过来，那些包目标不是本机，
+  #    auto-route 改的路由表管不到。
+  auto-redirect: true
+  auto-detect-interface: true
+  # 劫持所有发往 53 端口的查询 —— 客户端就算手动设了 8.8.8.8 也绕不过
+  dns-hijack:
+    - any:53
+  mtu: 1500
+  # 🔴 不开 strict-route：它会强制一切流量进 TUN，包括 SSH，
+  #    远程操作时有失联风险。auto-redirect 已经覆盖了旁路由所需的场景。
+  strict-route: false
+
+# ── DNS ───────────────────────────────────────────────────
+dns:
+  enable: true
+  listen: 0.0.0.0:53
+  ipv6: false
+  # fake-ip：海外域名不做真实解析，直接返回假 IP，
+  # 客户端往假 IP 发包进 TUN，mihomo 反查还原出域名。
+  # 这样 GEOSITE / DOMAIN 规则在 TUN 模式下才可用，且从机制上免疫 DNS 污染。
+  enhanced-mode: fake-ip
+  # 198.18.0.0/15 是 RFC 2544 的基准测试保留段，不会与真实地址冲突
+  fake-ip-range: 198.18.0.1/16
+
+  # 🔴 这些【不做】fake-ip，必须返回真实 IP。
+  #
+  # 语法限制：只支持 '*.' 前缀（匹配一级）和 '+.' 后缀（自身及所有子域），
+  # 【不支持】'time.*.com' 这种中间通配，也不支持 'vm-*' 这种尾部通配 ——
+  # 写了会报 invalid domain，配置直接校验不过。
+  fake-ip-filter:
+    - '*.lan'
+    - '*.local'
+    - '*.localdomain'
+    - '+.home'                          # 光猫的 zte.home
+    - '+.direct'
+    # 🔴 代理服务器自身的域名必须返回真实 IP，否则会绕路
+    - '${SELF_SERVER}'
+    # 网络连通性检测：拿到假 IP 会被误判成"无网络"
+    - '+.msftconnecttest.com'
+    - '+.msftncsi.com'
+    - 'connectivity-check.ubuntu.com'
+    - 'captive.apple.com'
+    # 需要真实 IP 的服务
+    - 'localhost.ptlogin2.qq.com'
+    - '+.pool.ntp.org'
+    - 'ntp.aliyun.com'
+    - 'time.windows.com'
+    - 'time.apple.com'
+    - '+.time.edu.cn'
+
+  # 解析下面 nameserver 里域名用的引导 DNS
+  default-nameserver: [223.5.5.5, 119.29.29.29]
+  # 国内域名用这些真解析。海外域名压根不解析，所以不需要配境外 DNS
+  nameserver: [223.5.5.5, 119.29.29.29]
+  # 🔴 解析【代理服务器自身】的域名，必须直连，否则鸡生蛋
+  proxy-server-nameserver: [223.5.5.5]
+
+  # 🔴 内网域名必须转给光猫解析。
+  #    它们在 fake-ip-filter 里（不做假 IP），但公共 DNS 不认识 zte.home 这类
+  #    光猫自己注册的名字 —— 不加这条会解析不出来。
+  nameserver-policy:
+    '+.home': [192.168.5.1]
+    '*.lan': [192.168.5.1]
+    '*.local': [192.168.5.1]
+    '*.localdomain': [192.168.5.1]
+
 # ── 自建节点（AI 专用线路）────────────────────────────────
 # 与订阅并存，互不干扰。同一台 VPS 的两个协议端口，
 # fallback 只能防「单协议被识别阻断」，防不了「服务器宕机」。
@@ -95,6 +171,10 @@ proxy-groups:
       - VMess-3xUI
     url: https://www.gstatic.com/generate_204
     interval: 180
+    # 🔴 lazy 默认 true：组未被使用时不做健康检查。
+    #    结果是启动瞬间没有健康数据，fallback 会选错候选，
+    #    要等 interval 到期才自愈。实测启动后 5 分钟内通用流量全走了自建节点。
+    lazy: false
 
   # 🔴 AI 服务：只走自建线路，【绝不切换到订阅节点】。
   #    自建两个协议都不健康时 → REJECT，连接立刻被拒。
@@ -106,6 +186,10 @@ proxy-groups:
       - REJECT
     url: https://www.gstatic.com/generate_204
     interval: 180
+    # 🔴 lazy 默认 true：组未被使用时不做健康检查。
+    #    结果是启动瞬间没有健康数据，fallback 会选错候选，
+    #    要等 interval 到期才自愈。实测启动后 5 分钟内通用流量全走了自建节点。
+    lazy: false
 
   # 订阅线路：按 provider 里的顺序取第一个健康的。
   # 节点失败会自动切下一个，但健康时一直用同一个 —— 不按延迟动态切换。
@@ -114,12 +198,13 @@ proxy-groups:
     use: [airport-a]
     url: https://www.gstatic.com/generate_204
     interval: 300
+    lazy: false
 
-  # 订阅兜底：订阅【全部】节点不可用时转自建线路；自建也挂 → REJECT。
+  # 通用出口：订阅【全部】节点不可用时转自建线路；自建也挂 → REJECT。
   # 🔴 最后一级是 REJECT 而不是 DIRECT，理由同 AI服务：
   #    连接立刻被拒（快速失败），你马上知道出问题了；
   #    退回 DIRECT 会变成「能上网但没代理」的隐性故障，察觉不到。
-  - name: 订阅兜底
+  - name: 通用出口
     type: fallback
     proxies:
       - 订阅线路
@@ -127,13 +212,14 @@ proxy-groups:
       - REJECT
     url: https://www.gstatic.com/generate_204
     interval: 300
+    lazy: false
 
   # 通用流量的落点。所有非 AI、非国内的流量走这里。
-  # select 类型：默认用订阅兜底，需要时可在面板上手动固定任意节点。
+  # select 类型：默认用通用出口，需要时可在面板上手动固定任意节点。
   - name: PROXY
     type: select
     proxies:
-      - 订阅兜底
+      - 通用出口
       - 订阅线路
       - 自建线路
       - DIRECT

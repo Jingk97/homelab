@@ -28,42 +28,132 @@
 
 ## 流量路由逻辑
 
+### 全景图
+
 ```mermaid
 flowchart TD
-    C["客户端流量"] --> R["规则表<br/>顺序匹配，第一条命中即停"]
-    R --> R1{"① 是 AI 域名吗<br/>90 条规则，最高优先级"}
-    R1 -->|"是"| AI["AI服务 · fallback"]
-    R1 -->|"否"| R2{"② 是国内吗<br/>GEOSITE,cn / GEOIP,CN"}
-    R2 -->|"是"| D["DIRECT<br/>家里电信 IP 直连"]
-    R2 -->|"否"| R3["③ MATCH 兜底"]
-    R3 --> P["PROXY · select<br/>43 个候选"]
+    subgraph CLIENT["客户端（什么都不用配）"]
+        C1["手机 / 电视 / 笔记本"]
+    end
 
-    AI --> A1{"自建线路健康"}
-    A1 -->|"是"| SELF["自建线路 · fallback"]
-    A1 -->|"否"| RJ1["REJECT<br/>连接立刻被拒"]
+    subgraph ENTRY["流量入口 · vm-router 192.168.5.2"]
+        E1["mihomo-tun 198.18.0.1/30<br/>auto-route 管 OUTPUT<br/>auto-redirect 管 FORWARD"]
+        E2["mixed-port 7890<br/>只服务手动配了代理的客户端"]
+    end
 
-    P -->|"默认"| SF["订阅兜底 · fallback"]
-    P -.->|"面板可手动固定"| MAN["39 节点 / 自建线路 / DIRECT"]
+    subgraph DNS["DNS · listen 0.0.0.0:53 · dns-hijack any:53"]
+        D1{"fake-ip-filter<br/>命中？"}
+        D2["nameserver-policy<br/>+.home / *.lan → 192.168.5.1"]
+        D3["nameserver<br/>223.5.5.5 / 119.29.29.29"]
+        D4["返回 fake-ip<br/>198.18.0.0/16<br/>内存记录 假IP ↔ 域名"]
+    end
 
-    SF --> S1{"订阅线路健康"}
-    S1 -->|"是"| SUB["订阅线路 · fallback<br/>39 节点按顺序取第一个健康的"]
-    S1 -->|"否"| S2{"自建线路健康"}
-    S2 -->|"是"| SELF
-    S2 -->|"否"| RJ2["REJECT"]
+    subgraph RULES["规则表 · 顺序匹配 · 第一条命中即停"]
+        R1{"① AI 规则 90 条<br/>DOMAIN-SUFFIX,openai.com<br/>DOMAIN-SUFFIX,chatgpt.com<br/>DOMAIN-SUFFIX,anthropic.com<br/>DOMAIN-SUFFIX,claude.ai …"}
+        R2{"② GEOSITE,cn<br/>GEOIP,CN"}
+        R3["③ MATCH"]
+    end
 
-    SELF --> T1{"Trojan 健康"}
-    T1 -->|"是"| TN["Trojan-3xUI :9444"]
-    T1 -->|"否"| VN["VMess-3xUI :9445"]
+    subgraph GROUPS["策略组"]
+        G1["AI服务 · fallback"]
+        G2["PROXY · select<br/>43 候选可手动固定"]
+        G3["通用出口 · fallback"]
+        G4["订阅线路 · fallback"]
+        G5["自建线路 · fallback"]
+    end
 
-    AI -.->|"🔴 结构上不可能连到"| SUB
+    subgraph NODES["终端"]
+        N1["Trojan-3xUI<br/><自建服务器>:9444"]
+        N2["VMess-3xUI<br/><自建服务器>:9445"]
+        N3["订阅 39 节点<br/>香港01 / 日本01 / …"]
+        N4["DIRECT<br/>家里电信 IP"]
+        N5["REJECT<br/>连接被拒"]
+    end
+
+    C1 -->|"网关 = .2<br/>DNS = .2"| E1
+    C1 -.->|"手动设代理"| E2
+    E1 --> D1
+    D1 -->|"命中 zte.home / *.lan"| D2
+    D1 -->|"命中 国内域名"| D3
+    D1 -->|"未命中 海外域名"| D4
+    D2 --> N4
+    D3 --> R1
+    D4 --> R1
+    E2 --> R1
+
+    R1 -->|"是 AI"| G1
+    R1 -->|"否"| R2
+    R2 -->|"是国内"| N4
+    R2 -->|"否"| R3
+    R3 --> G2
+
+    G1 -->|"① 首选"| G5
+    G1 -->|"② 自建全挂"| N5
+
+    G2 -->|"默认"| G3
+    G2 -.->|"手动固定"| N3
+    G2 -.->|"手动固定"| G5
+    G2 -.->|"手动固定"| N4
+
+    G3 -->|"① 首选"| G4
+    G3 -->|"② 订阅全挂"| G5
+    G3 -->|"③ 都挂"| N5
+
+    G4 --> N3
+    G5 -->|"① 首选"| N1
+    G5 -->|"② Trojan 不健康"| N2
+
+    G1 -.->|"🔴 结构上不可能连到"| G4
 ```
 
 ### 三条降级链
 
 ```
-AI 域名   →  自建线路(Trojan → VMess)  →  REJECT
-其余流量  →  订阅线路(39 节点顺序切)   →  自建线路(Trojan → VMess)  →  REJECT
-国内域名  →  DIRECT
+AI 域名   →  AI服务   →  自建线路(Trojan-3xUI → VMess-3xUI)  →  REJECT
+其余流量  →  PROXY   →  通用出口  →  订阅线路(39 节点顺序切)
+                                  →  自建线路(Trojan-3xUI → VMess-3xUI)
+                                  →  REJECT
+国内域名  →  DIRECT（家里电信 IP）
+```
+
+### 策略组一览
+
+| 组名 | 类型 | 候选链 | 职责 |
+|---|---|---|---|
+| `自建线路` | `fallback` | `Trojan-3xUI` → `VMess-3xUI` | 协议级冗余，同一台 VPS 两个端口 |
+| **`AI服务`** | `fallback` | `自建线路` → **`REJECT`** | 🔴 候选里**没有订阅节点，也没有 DIRECT** |
+| `订阅线路` | `fallback` | 订阅 39 节点 | 按 provider 顺序取第一个健康的 |
+| `通用出口` | `fallback` | `订阅线路` → `自建线路` → **`REJECT`** | **平时就在用**，不是"只在异常时用" |
+| **`PROXY`** | `select` | `通用出口` / `订阅线路` / `自建线路` / `DIRECT` / 39 节点 | 通用流量落点，43 候选可手动固定 |
+
+### 规则表
+
+| 优先级 | 规则 | 目标 | 条数 |
+|---|---|---|---|
+| ① | `DOMAIN-SUFFIX,openai.com` `chatgpt.com` `anthropic.com` `claude.ai` … | **`AI服务`** | **90** |
+| ② | `GEOSITE,cn` | `DIRECT` | 111,097 域名 |
+| ③ | `GEOIP,CN` | `DIRECT` | GeoIP 库 |
+| ④ | `MATCH` | `PROXY` | 兜底 |
+
+### DNS 分流实测
+
+| 域名 | 解析结果 | 说明 |
+|---|---|---|
+| `zte.home` | `192.168.5.1` | `nameserver-policy` 转给光猫 |
+| `<自建服务器域名>` | `<真实 IP>` | 在 `fake-ip-filter` 里，返回真实 IP |
+| `connectivity-check.ubuntu.com` | `185.125.190.101` | 同上，避免误判"无网络" |
+| `www.baidu.com` | `198.18.0.6` | fake-ip。反查域名后命中 `GEOSITE,cn` → `DIRECT` |
+| `www.youtube.com` | `198.18.0.4` | fake-ip → `MATCH` → `PROXY` |
+| `chatgpt.com` | `198.18.0.5` | fake-ip → AI 规则 → `AI服务` |
+
+> 🔴 **国内域名也返回 fake-ip 是正常的** —— fake-ip 只是"给客户端一个占位地址"，mihomo 反查出域名后照样能命中 `GEOSITE,cn` 走 `DIRECT`，届时由它自己真解析再连。
+
+### 链路实测
+
+```
+huggingface.co         DomainSuffix,huggingface.co   AI服务 <- 自建线路 <- Trojan-3xUI
+speed.cloudflare.com   Match                         PROXY <- 通用出口 <- 订阅线路 <- 香港01
+mirrors.aliyun.com                                   DIRECT
 ```
 
 ### 两个贯穿全局的设计决定
@@ -77,7 +167,7 @@ AI 域名   →  自建线路(Trojan → VMess)  →  REJECT
 
 `AI服务` 的候选只有 `[自建线路, REJECT]` —— **没有任何订阅节点，也没有 `DIRECT`**。即使规则写错、即使手动误操作，也不可能把 AI 流量送到订阅节点上。
 
-原因：AI 服务对**出口 IP 纯净度**敏感。共享节点上的其他用户行为会连累你的账号，表现为验证码变多、限流、乃至封号。
+原因：AI 服务对**出口 IP 纯净度**敏感。共享节点上其他用户的行为会连累你的账号，表现为验证码变多、限流、乃至封号。
 
 ---
 
@@ -386,6 +476,110 @@ ipv6: false
 | **apt 源换阿里云/中科大** | 最简单，实测都 200。**推荐** |
 | 打开 `ipv6: true` | 重新引入 IPv6 分流泄漏风险 |
 | 加规则让清华走代理 | 清华拒绝境外 IP，更不通 |
+
+### 10 · 🔴 `systemd-resolved` 占着 53，与 `0.0.0.0:53` 不能共存
+
+```
+UDP 0.0.0.0:53  Errno 98 Address already in use
+TCP 0.0.0.0:53  Errno 98
+```
+
+`systemd-resolved` 监听 `127.0.0.53:53`（stub）。**通配绑定 `0.0.0.0:53` 与任何 `x.x.x.x:53` 冲突**，不是"只要地址不同就能共存"。
+
+```bash
+# /etc/systemd/resolved.conf.d/20-no-stub.conf
+[Resolve]
+DNSStubListener=no
+```
+
+```bash
+# resolv.conf 从 stub 改指向真实上游
+sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
+```
+
+关掉后 `systemd-resolved` 仍工作，只是不再监听 53。
+
+> ⚠️ **但 vm-router 自己的 DNS 最终还是会走 mihomo** —— `dns-hijack: any:53` + `auto-route` 会把本机发往 `223.5.5.5:53` 的查询也劫持进 TUN。实测 `getent hosts www.baidu.com` 返回 `198.18.0.x`。
+>
+> 这不是问题：**mihomo 正常退出时会清理 TUN 设备、nftables 规则和路由表**，DNS 自动恢复直连。只有 mihomo 卡死（进程在但不工作）才会陷入"解析不了 → 修不了"，那种情况用 Proxmox 的 noVNC 进。
+
+### 11 · 🔴 `fake-ip-filter` 的语法限制
+
+只支持 **`*.` 前缀**（匹配一级）和 **`+.` 后缀**（自身及所有子域）：
+
+| 写法 | 合法 |
+|---|---|
+| `*.lan` `+.home` `example.com` | ✅ |
+| `time.*.com`（中间通配） | 🔴 `invalid domain` |
+| `vm-*` `pve*`（尾部通配） | 🔴 `invalid domain` |
+
+报错只有一句 `level=error msg="invalid domain"`，**不指出是哪一条**，只能逐条排查。
+
+### 12 · 🔴 `lazy` 默认 `true` 让 fallback 启动时选错候选
+
+实测现象：重启后 `通用出口` 选中了 `自建线路`，**而 `订阅线路` 明明健康（延迟 352ms）**。
+
+```
+通用出口   延迟=未测   → 自建线路      🔴
+订阅线路   延迟=352    → 香港01        健康
+自建线路   延迟=790    → Trojan-3xUI   健康
+```
+
+根因：健康检查的 `lazy` 默认为 `true` —— **组未被使用时不测速**。启动瞬间没有任何健康数据，fallback 的选择就不确定了，要等 `interval` 到期（300 秒）才自愈。
+
+**后果**：启动后最长 5 分钟内，通用流量全部走了本该只给 AI 用的自建节点。
+
+```yaml
+- name: 通用出口
+  type: fallback
+  interval: 300
+  lazy: false        # 🔴 启动后立即并持续测速
+```
+
+手动触发健康检查可立刻验证：
+
+```bash
+curl -H "Authorization: Bearer <secret>" \
+  'http://vm-router:9090/group/<组名URL编码>/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000'
+# 返回 {"自建线路":890,"订阅线路":277} 后立刻切回 订阅线路
+```
+
+### 13 · 内网域名要用 `nameserver-policy` 转给光猫
+
+`zte.home` 在 `fake-ip-filter` 里（不做假 IP，要真实解析），但**公共 DNS 不认识光猫自己注册的名字** —— 解析结果为空。
+
+```yaml
+dns:
+  nameserver-policy:
+    '+.home': [192.168.5.1]
+    '*.lan': [192.168.5.1]
+```
+
+### 14 · 代理服务器域名必须进 `fake-ip-filter`
+
+不加的话 `getent <自建服务器域名>` 返回 `198.18.0.x`。mihomo 内部靠 `proxy-server-nameserver` 直连解析所以能连上，但本机层面看到的是假 IP，排查时极易误判。
+
+```yaml
+fake-ip-filter:
+  - '${SELF_SERVER}'          # 渲染时替换成真实域名
+```
+
+### 15 · 远程改 TUN 有失联风险，先挂自动回滚
+
+TUN 会改内核路由表和 nftables。改坏了 SSH 会断，就没法执行 `systemctl stop` 了。
+
+```bash
+# 部署前挂 5 分钟自动回滚
+sudo cp -a /etc/mihomo/config.yaml /etc/mihomo/config.yaml.before-tun
+sudo systemd-run --on-active=300 --unit=mihomo-rollback --collect \
+  /bin/sh -c "cp /etc/mihomo/config.yaml.before-tun /etc/mihomo/config.yaml; systemctl restart mihomo"
+
+# 验证通过后取消
+sudo systemctl stop mihomo-rollback.timer
+```
+
+> **`strict-route` 不要开** —— 它会强制一切流量进 TUN 包括 SSH，远程操作时失联风险高。`auto-redirect` 已经覆盖旁路由所需的场景。
 
 ---
 
