@@ -321,6 +321,54 @@ rules:
   - DOMAIN-SUFFIX,groq.com,AI服务
   - DOMAIN-SUFFIX,elevenlabs.io,AI服务
   - DOMAIN-SUFFIX,character.ai,AI服务
+  # 泄漏审计补充（实测这些域名原本落到了 MATCH，走了订阅节点）
+  - DOMAIN-SUFFIX,openrouter.ai,AI服务
+  - DOMAIN-SUFFIX,together.xyz,AI服务      # together.ai 的 API 是 .xyz 域名
+  - DOMAIN-SUFFIX,you.com,AI服务
+  - DOMAIN-SUFFIX,phind.com,AI服务
+  - DOMAIN-SUFFIX,deepl.com,AI服务
+  - DOMAIN-SUFFIX,notion.so,AI服务          # Notion AI
+  - DOMAIN-SUFFIX,notion.com,AI服务
+  - DOMAIN-SUFFIX,fireworks.ai,AI服务
+  - DOMAIN-SUFFIX,anyscale.com,AI服务
+  - DOMAIN-SUFFIX,deepinfra.com,AI服务
+  - DOMAIN-SUFFIX,siliconflow.com,AI服务
+  - DOMAIN-SUFFIX,novita.ai,AI服务
+  - DOMAIN-SUFFIX,jina.ai,AI服务
+  - DOMAIN-SUFFIX,voyageai.com,AI服务
+  - DOMAIN-SUFFIX,pinecone.io,AI服务
+  - DOMAIN-SUFFIX,weaviate.io,AI服务
+  - DOMAIN-SUFFIX,langchain.com,AI服务
+  - DOMAIN-SUFFIX,smith.langchain.com,AI服务
+  - DOMAIN-SUFFIX,langfuse.com,AI服务
+  - DOMAIN-SUFFIX,wandb.ai,AI服务
+  - DOMAIN-SUFFIX,modal.com,AI服务
+  - DOMAIN-SUFFIX,lovable.dev,AI服务
+  - DOMAIN-SUFFIX,bolt.new,AI服务
+  - DOMAIN-SUFFIX,v0.dev,AI服务
+  - DOMAIN-SUFFIX,vercel.com,AI服务
+  - DOMAIN-SUFFIX,suno.com,AI服务
+  - DOMAIN-SUFFIX,suno.ai,AI服务
+  - DOMAIN-SUFFIX,udio.com,AI服务
+  - DOMAIN-SUFFIX,luma-ai.com,AI服务
+  - DOMAIN-SUFFIX,lumalabs.ai,AI服务
+  - DOMAIN-SUFFIX,pika.art,AI服务
+  - DOMAIN-SUFFIX,kling.ai,AI服务
+  - DOMAIN-SUFFIX,ideogram.ai,AI服务
+  - DOMAIN-SUFFIX,recraft.ai,AI服务
+  - DOMAIN-SUFFIX,krea.ai,AI服务
+  - DOMAIN-SUFFIX,flux1.ai,AI服务
+  - DOMAIN-SUFFIX,blackforestlabs.ai,AI服务
+
+  # 🔴 用 GEOSITE 兜底，覆盖静态列表漏掉的新域名。
+  #    MetaCubeX 持续更新，比手写列表可靠。放在自定义规则之后，
+  #    这样特定域名仍可单独指向别的组。
+  - GEOSITE,openai,AI服务
+  - GEOSITE,anthropic,AI服务
+  - GEOSITE,google-gemini,AI服务
+  - GEOSITE,perplexity,AI服务
+  - GEOSITE,category-ai-!cn,AI服务
+
   # 图像/视频
   - DOMAIN-SUFFIX,stability.ai,AI服务
   - DOMAIN-SUFFIX,civitai.com,AI服务

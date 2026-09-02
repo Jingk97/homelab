@@ -690,6 +690,85 @@ App → Surge（本地 TUN 或系统代理）
 
 ---
 
+## AI 流量泄漏审计
+
+结构隔离只保证"AI 组不可能连到订阅"，**不保证"所有 AI 域名都命中了 AI 规则"**。没被规则覆盖的域名会落到 `MATCH` → 走订阅节点 —— 这才是真正的泄漏形式。
+
+### 三层验证
+
+**① 结构层**：递归展开 `AI服务` 的候选，确认终端只有自建节点与 REJECT
+
+```bash
+curl -s -H "Authorization: Bearer <secret>" http://vm-router:9090/proxies \
+  | python3 -c "…递归展开 AI服务 的 all…"
+```
+
+```
+AI服务 候选: ['自建线路', 'REJECT']
+递归展开的终端节点: ['REJECT', 'Trojan-3xUI', 'VMess-3xUI']
+候选里有订阅节点吗: 否 ✅    候选里有 DIRECT 吗: 否 ✅
+```
+
+**② 规则覆盖层**：对一批 AI 域名发起限速连接，从连接列表看各自走了哪条链
+
+```bash
+for d in api.openai.com openrouter.ai api.together.xyz you.com …; do
+  sudo nohup curl --limit-rate 1k --max-time 30 -sL -o /dev/null "https://$d" &
+done
+sleep 12
+# 然后查 /connections，按 chains[-1] 是否为 AI服务 分类
+```
+
+**③ 判据**：`chains` 的最外层不是 `AI服务` 的 AI 域名 = 泄漏
+
+### 实测抓到的三个泄漏
+
+```
+openrouter.ai       Match → PROXY → 通用出口 → 订阅线路 → 美国LA02   🔴
+api.together.xyz    Match → PROXY → …                              🔴
+you.com             Match → PROXY → …                              🔴
+```
+
+🔴 **`api.together.xyz` 最典型** —— 规则里写的是 `together.ai`，但它的 **API 用 `together.xyz`**，完全不同的顶级域。**同一家服务用多个顶级域是常态**，静态列表必漏。
+
+### 修复：37 条补充 + 5 条 GEOSITE 兜底
+
+```yaml
+rules:
+  # 自定义域名（可精确控制，优先级最高）
+  - DOMAIN-SUFFIX,openrouter.ai,AI服务
+  - DOMAIN-SUFFIX,together.xyz,AI服务
+  …
+
+  # 🔴 GEOSITE 兜底，覆盖静态列表漏掉的新域名
+  - GEOSITE,openai,AI服务
+  - GEOSITE,anthropic,AI服务
+  - GEOSITE,google-gemini,AI服务      # 41 条
+  - GEOSITE,perplexity,AI服务         # 5 条
+  - GEOSITE,category-ai-!cn,AI服务    # 180 条，MetaCubeX 持续更新
+```
+
+**GEOSITE 放在自定义规则之后** —— 这样特定域名仍可单独指向别的组，兜底只兜漏网的。
+
+`category-ai-!cn` 的 `!cn` 表示"排除中国"，国内 AI（DeepSeek / Kimi 等）不会被误导入自建线路。
+
+AI 规则总数从 **90 → 132 条 + 3 个 GEOSITE 类别（226 条）**。
+
+### 复测
+
+```
+✅ 走 AI服务   openrouter.ai / api.together.xyz / you.com / jina.ai / suno.com / huggingface.co
+未走 AI服务    只剩 Apple 推送（不是 AI 服务，走订阅正确）
+```
+
+### 🟡 这个审计要定期重做
+
+新 AI 服务不断出现，静态列表必然滞后。GEOSITE 每 12 小时自动更新能兜住大部分，但**新服务进入 geosite 库也有延迟**。
+
+建议每次开始用一个新的 AI 服务时，跑一次上面第 ② 步的验证。
+
+---
+
 ## 待办
 
 ```
