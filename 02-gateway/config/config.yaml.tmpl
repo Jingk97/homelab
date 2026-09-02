@@ -45,7 +45,32 @@ geox-url:
   geosite: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
   asn:     "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
 
-# ── 节点来源 ──────────────────────────────────────────────
+# ── 自建节点（AI 专用线路）────────────────────────────────
+# 与订阅并存，互不干扰。同一台 VPS 的两个协议端口，
+# fallback 只能防「单协议被识别阻断」，防不了「服务器宕机」。
+proxies:
+  - name: Trojan-3xUI
+    type: trojan
+    server: ${SELF_SERVER}
+    port: 9444
+    password: ${SELF_TROJAN_PASSWORD}
+    sni: ${SELF_SERVER}
+    skip-cert-verify: false
+    udp: true
+
+  - name: VMess-3xUI
+    type: vmess
+    server: ${SELF_SERVER}
+    port: 9445
+    uuid: ${SELF_VMESS_UUID}
+    alterId: 0                      # Surge 的 vmess-aead=true 对应 alterId: 0
+    cipher: auto
+    tls: true
+    servername: ${SELF_SERVER}
+    skip-cert-verify: false
+    udp: true
+
+# ── 订阅节点来源 ──────────────────────────────────────────
 proxy-providers:
   airport-a:
     type: http
@@ -61,34 +86,170 @@ proxy-providers:
 
 # ── 策略组 ────────────────────────────────────────────────
 proxy-groups:
-  # 规则的落点。所有 rules 都指向这个名字 ——
-  # 以后换机场、加策略组，规则一行都不用改。
-  - name: PROXY
-    type: select
+  # 自建线路：Trojan 优先，不健康时切 VMess。
+  # 🔴 fallback 只在【当前节点不健康】时切换，不会因延迟波动而切 —— 出口 IP 稳定。
+  - name: 自建线路
+    type: fallback
     proxies:
-      - 自动选择                     # 想自动测速时选它
-      - DIRECT                       # 🔴 逃生开关：代理出问题时面板上一点，全家立刻直连
-    use: [airport-a]                 # 39 个节点全部列为候选，可手动固定某一个
+      - Trojan-3xUI
+      - VMess-3xUI
+    url: https://www.gstatic.com/generate_204
+    interval: 180
 
-  # 自动测速组。保留它，需要时在 PROXY 里切回来。
-  - name: 自动选择
-    type: url-test
+  # 🔴 AI 服务：只走自建线路，【绝不切换到订阅节点】。
+  #    自建两个协议都不健康时 → REJECT，连接立刻被拒。
+  #    这是刻意的：快速失败比连接超时转圈半天好，你能立刻知道出了问题。
+  - name: AI服务
+    type: fallback
+    proxies:
+      - 自建线路
+      - REJECT
+    url: https://www.gstatic.com/generate_204
+    interval: 180
+
+  # 订阅线路：按 provider 里的顺序取第一个健康的。
+  # 节点失败会自动切下一个，但健康时一直用同一个 —— 不按延迟动态切换。
+  - name: 订阅线路
+    type: fallback
     use: [airport-a]
     url: https://www.gstatic.com/generate_204
     interval: 300
-    tolerance: 50                    # 延迟差 50ms 内不切换，避免来回抖动
+
+  # 订阅兜底：订阅【全部】节点不可用时转自建线路；自建也挂 → REJECT。
+  # 🔴 最后一级是 REJECT 而不是 DIRECT，理由同 AI服务：
+  #    连接立刻被拒（快速失败），你马上知道出问题了；
+  #    退回 DIRECT 会变成「能上网但没代理」的隐性故障，察觉不到。
+  - name: 订阅兜底
+    type: fallback
+    proxies:
+      - 订阅线路
+      - 自建线路
+      - REJECT
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+
+  # 通用流量的落点。所有非 AI、非国内的流量走这里。
+  # select 类型：默认用订阅兜底，需要时可在面板上手动固定任意节点。
+  - name: PROXY
+    type: select
+    proxies:
+      - 订阅兜底
+      - 订阅线路
+      - 自建线路
+      - DIRECT
+    use: [airport-a]                # 39 个节点也列为候选，可手动固定
 
 # ── 规则（顺序匹配，第一条命中即停）────────────────────────
 rules:
-  # 🔴 GEOSITE 必须在 GEOIP 前面。
-  #    HTTP 代理请求携带的是【域名】，此时还没有 IP。
-  #    GEOSITE 按域名判断，不需要解析，快且准。
-  - GEOSITE,cn,DIRECT               # 域名在国内站点库里 → 直连
+  # ── AI 服务（最高优先级，只走自建线路，失败即 REJECT）──
+  # 以下来自 Surge rules-main.dconf 的 ChatGPT / claude 两段，原样迁移
+  - DOMAIN,api.statsig.com,AI服务
+  - DOMAIN,browser-intake-datadoghq.com,AI服务
+  - DOMAIN,chat.openai.com.cdn.cloudflare.net,AI服务
+  - DOMAIN,o33249.ingest.sentry.io,AI服务
+  - DOMAIN,openai-api.arkoselabs.com,AI服务
+  - DOMAIN,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net,AI服务
+  - DOMAIN,openaicomproductionae4b.blob.core.windows.net,AI服务
+  - DOMAIN,production-openaicom-storage.azureedge.net,AI服务
+  - DOMAIN,static.cloudflareinsights.com,AI服务
+  - DOMAIN-KEYWORD,openaicom-api,AI服务
+  - DOMAIN-SUFFIX,algolia.net,AI服务
+  - DOMAIN-SUFFIX,auth0.com,AI服务
+  - DOMAIN-SUFFIX,cdn.cloudflare.net,AI服务
+  - DOMAIN-SUFFIX,challenges.cloudflare.com,AI服务
+  - DOMAIN-SUFFIX,chatgpt.livekit.cloud,AI服务
+  - DOMAIN-SUFFIX,client-api.arkoselabs.com,AI服务
+  - DOMAIN-SUFFIX,events.statsigapi.net,AI服务
+  - DOMAIN-SUFFIX,featuregates.org,AI服务
+  - DOMAIN-SUFFIX,host.livekit.cloud,AI服务
+  - DOMAIN-SUFFIX,identrust.com,AI服务
+  - DOMAIN-SUFFIX,intercom.io,AI服务
+  - DOMAIN-SUFFIX,intercomcdn.com,AI服务
+  - DOMAIN-SUFFIX,launchdarkly.com,AI服务
+  - DOMAIN-SUFFIX,oaistatic.com,AI服务
+  - DOMAIN-SUFFIX,oaiusercontent.com,AI服务
+  - DOMAIN-SUFFIX,observeit.net,AI服务
+  - DOMAIN-SUFFIX,openai.com,AI服务
+  - DOMAIN-SUFFIX,openaiapi-site.azureedge.net,AI服务
+  - DOMAIN-SUFFIX,openaicom.imgix.net,AI服务
+  - DOMAIN-SUFFIX,poe.com,AI服务
+  - DOMAIN-SUFFIX,segment.io,AI服务
+  - DOMAIN-SUFFIX,sentry.io,AI服务
+  - DOMAIN-SUFFIX,stripe.com,AI服务
+  - DOMAIN-SUFFIX,turn.livekit.cloud,AI服务
+  - IP-CIDR,24.199.123.28/32,AI服务,no-resolve
+  - IP-CIDR,45.76.214.191/32,AI服务,no-resolve
+  - IP-CIDR,64.23.132.171/32,AI服务,no-resolve
+  - IP-CIDR,143.198.200.27/32,AI服务,no-resolve
+  - IP-CIDR,159.89.204.203/32,AI服务,no-resolve
+  - DOMAIN-SUFFIX,anthropic.com,AI服务
+  - DOMAIN-SUFFIX,claude.ai,AI服务
+  - DOMAIN-SUFFIX,claude.com,AI服务
+  - DOMAIN-SUFFIX,clau.de,AI服务
+  - DOMAIN-SUFFIX,claudemcpclient.com,AI服务
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI服务
+  - DOMAIN-SUFFIX,claudemcpcontent.com,AI服务
+  - DOMAIN-SUFFIX,anthropicusercontent.com,AI服务
+  - DOMAIN,servd-anthropic-website.b-cdn.net,AI服务
+  - DOMAIN,anthropic.com.cdn.cloudflare.net,AI服务
+  - DOMAIN,anthropic.auth0.com,AI服务
+  - DOMAIN,anthropic-com.ghost.io,AI服务
+  - DOMAIN-SUFFIX,statsigapi.net,AI服务
+  - DOMAIN,browser-intake-us5-datadoghq.com,AI服务
+  - DOMAIN-KEYWORD,datadog,AI服务
+  - DOMAIN-KEYWORD,sentry,AI服务
+  - DOMAIN-KEYWORD,sift,AI服务
+  - DOMAIN,cdn.usefathom.com,AI服务
+  - DOMAIN-SUFFIX,usefathom.com,AI服务
+  - IP-CIDR,160.79.104.0/21,AI服务,no-resolve
 
-  # IP 维度兜底：域名没命中 GEOSITE，或客户端直接给的就是 IP。
-  # 🔴 这里【不能加 no-resolve】—— 加了会导致带域名的连接直接跳过这条规则，
-  #    结果国内网站全部落到 MATCH 走代理（实测 www.qq.com 走了日本节点）。
+  # ── 补充的常见 AI 服务 ──
+  # OpenAI 生态
+  - DOMAIN-SUFFIX,chatgpt.com,AI服务
+  - DOMAIN-SUFFIX,sora.com,AI服务
+  - DOMAIN-SUFFIX,openai.fm,AI服务
+  - DOMAIN-SUFFIX,videos.openai.com,AI服务
+  # Google AI
+  - DOMAIN-SUFFIX,gemini.google.com,AI服务
+  - DOMAIN-SUFFIX,aistudio.google.com,AI服务
+  - DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI服务
+  - DOMAIN-SUFFIX,makersuite.google.com,AI服务
+  - DOMAIN-SUFFIX,labs.google,AI服务
+  # 编程类 AI
+  - DOMAIN-SUFFIX,githubcopilot.com,AI服务
+  - DOMAIN-SUFFIX,copilot.microsoft.com,AI服务
+  - DOMAIN-SUFFIX,cursor.com,AI服务
+  - DOMAIN-SUFFIX,cursor.sh,AI服务
+  - DOMAIN-SUFFIX,codeium.com,AI服务
+  - DOMAIN-SUFFIX,windsurf.com,AI服务
+  # 其他主流
+  - DOMAIN-SUFFIX,x.ai,AI服务
+  - DOMAIN-SUFFIX,grok.com,AI服务
+  - DOMAIN-SUFFIX,perplexity.ai,AI服务
+  - DOMAIN-SUFFIX,midjourney.com,AI服务
+  - DOMAIN-SUFFIX,huggingface.co,AI服务
+  - DOMAIN-SUFFIX,replicate.com,AI服务
+  - DOMAIN-SUFFIX,mistral.ai,AI服务
+  - DOMAIN-SUFFIX,cohere.com,AI服务
+  - DOMAIN-SUFFIX,together.ai,AI服务
+  - DOMAIN-SUFFIX,groq.com,AI服务
+  - DOMAIN-SUFFIX,elevenlabs.io,AI服务
+  - DOMAIN-SUFFIX,character.ai,AI服务
+  # 图像/视频
+  - DOMAIN-SUFFIX,stability.ai,AI服务
+  - DOMAIN-SUFFIX,civitai.com,AI服务
+  - DOMAIN-SUFFIX,runwayml.com,AI服务
+  - DOMAIN-SUFFIX,leonardo.ai,AI服务
+
+  # ── 国内直连 ──────────────────────────────────────────
+  # 🔴 GEOSITE 必须在 GEOIP 前面：HTTP 代理请求携带的是域名，此时还没有 IP。
+  #    GEOSITE 按域名判断，不需解析，快且准。
+  - GEOSITE,cn,DIRECT
+
+  # IP 维度兜底。🔴 不能加 no-resolve —— 加了会导致带域名的连接跳过这条，
+  # 国内流量全部落到 MATCH 走代理（实测 www.qq.com 走了日本节点）。
   - GEOIP,CN,DIRECT
 
-  # 兜底。MATCH 匹配一切，必须是最后一条，否则后面的规则都是死代码。
+  # ── 兜底 ──────────────────────────────────────────────
+  # MATCH 匹配一切，必须最后一条，否则后面的规则都是死代码。
   - MATCH,PROXY
