@@ -442,7 +442,7 @@ ssh jing@192.168.5.90
 
 ## 5. 模板通用配置脚本
 
-系统装完之后、去身份化之前，跑一遍 [`scripts/provision-base.sh`](../scripts/provision-base.sh)，把**所有克隆机都需要**的东西一次配齐。
+系统装完之后、去身份化之前，跑一遍 [`scripts/provision-base.sh`](scripts/provision-base.sh)，把**所有克隆机都需要**的东西一次配齐。
 
 ### 5.1 边界：什么进模板，什么不进
 
@@ -783,7 +783,7 @@ echo $?        # 0 = 全部通过；1 = 有 FAIL 项
 
 ### 5.8 修复与体检脚本 fix-root-residue.sh
 
-[`scripts/fix-root-residue.sh`](../scripts/fix-root-residue.sh) 做三件事：**扫描残留 → 确认后清理 → 重新体检**。
+[`scripts/fix-root-residue.sh`](scripts/fix-root-residue.sh) 做三件事：**扫描残留 → 确认后清理 → 重新体检**。
 
 ```bash
 ./fix-root-residue.sh              # 扫描 → 交互确认 → 清理 → 体检
@@ -1027,7 +1027,7 @@ done
 
 #### 用法
 
-[`scripts/sysprep.sh`](../scripts/sysprep.sh) 把上面这条顺序约束固化进流程，一次做完。
+[`scripts/sysprep.sh`](scripts/sysprep.sh) 把上面这条顺序约束固化进流程，一次做完。
 
 ```bash
 # 🔴 执行前先在 Proxmox 网页上打快照 —— 本脚本不可逆
