@@ -1,12 +1,8 @@
 # ─────────────────────────────────────────────────────────────
 # mihomo 配置模板
-#
-# 渲染：占位符 ${MIHOMO_SECRET} 由 mihomo.local.env 提供
-# 部署：/etc/mihomo/config.yaml，权限 600
-# 校验：sudo mihomo -t -d /etc/mihomo
-#
-# 🔴 当前处于【最小验证】阶段：不接管任何流量。
-#    TUN / DNS / 节点 / 分流规则的设计见同目录 README.md
+#   渲染：${...} 占位符由 mihomo.local.env 提供
+#   部署：/etc/mihomo/config.yaml，权限 600
+#   校验：sudo mihomo -t -d /etc/mihomo
 # ─────────────────────────────────────────────────────────────
 
 mixed-port: 7890          # HTTP 与 SOCKS5 共用一个端口
@@ -15,16 +11,84 @@ bind-address: '*'
 mode: rule
 log-level: info
 
+# 🔴 关掉 mihomo 自身的 IPv6，两个作用：
+#   1. 拉订阅时走 IPv4，命中机场的 IP 白名单
+#      （默认按 RFC 6724 优先 IPv6，会带着 240e:... 出去被 403 拒绝）
+#   2. DNS 不返回 AAAA，客户端不会尝试 IPv6 直连绕过代理
+#      —— 从源头消除分流泄漏
+# 代价：只有 IPv6 的站点访问不了，极少见。
+ipv6: false
+
 # RESTful 控制接口。热重载与 Web 面板都靠它
 external-controller: 0.0.0.0:9090
-# 🔴 必须设。不设的话局域网内任何人都能改代理配置、看全部连接
+# 🔴 必须设，否则局域网内任何人都能改配置、看全部连接
 secret: "${MIHOMO_SECRET}"
+# 面板静态文件。external-ui 在【启动时】注册路由，改了要 restart
+external-ui: /etc/mihomo/ui
 
+# 🔴 selector 的手动选择默认【只存在内存里】，重启就回到第一个候选。
+#    开这个才会持久化到 cache.db，重启后保持你在面板上选的节点。
+profile:
+  store-selected: true
+
+# ── GeoIP / Geosite 数据库来源 ────────────────────────────
+# 🔴 必须显式指定。mihomo 默认用 raw.githubusercontent.com，
+#    该域名在国内直连和走代理都被重置 —— 结果是 GEOIP 规则初始化失败，
+#    mihomo 直接 fatal 退出，配合 Restart=always 变成无限重启循环。
+#    实测下载速度：jsdelivr cdn 1.8MB/s > testingcf 572KB/s
+#                  >> GitHub Release 27KB/s >> raw.githubusercontent 不可达
+geo-auto-update: true
+geo-update-interval: 12        # 小时
+geox-url:
+  geoip:   "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  mmdb:    "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+  geosite: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  asn:     "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
+
+# ── 节点来源 ──────────────────────────────────────────────
+proxy-providers:
+  airport-a:
+    type: http
+    url: "${SUB_URL_A}"
+    # 拉下来缓存到这（相对 -d /etc/mihomo）。拉取失败时继续用旧缓存，
+    # 所以订阅出问题不会导致 mihomo 起不来
+    path: ./providers/airport-a.yaml
+    interval: 86400                 # 自动更新间隔，秒
+    health-check:
+      enable: true                  # url-test 类型的策略组必须有它
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+# ── 策略组 ────────────────────────────────────────────────
 proxy-groups:
+  # 规则的落点。所有 rules 都指向这个名字 ——
+  # 以后换机场、加策略组，规则一行都不用改。
   - name: PROXY
     type: select
     proxies:
-      - DIRECT
+      - 自动选择                     # 想自动测速时选它
+      - DIRECT                       # 🔴 逃生开关：代理出问题时面板上一点，全家立刻直连
+    use: [airport-a]                 # 39 个节点全部列为候选，可手动固定某一个
 
+  # 自动测速组。保留它，需要时在 PROXY 里切回来。
+  - name: 自动选择
+    type: url-test
+    use: [airport-a]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50                    # 延迟差 50ms 内不切换，避免来回抖动
+
+# ── 规则（顺序匹配，第一条命中即停）────────────────────────
 rules:
-  - MATCH,DIRECT
+  # 🔴 GEOSITE 必须在 GEOIP 前面。
+  #    HTTP 代理请求携带的是【域名】，此时还没有 IP。
+  #    GEOSITE 按域名判断，不需要解析，快且准。
+  - GEOSITE,cn,DIRECT               # 域名在国内站点库里 → 直连
+
+  # IP 维度兜底：域名没命中 GEOSITE，或客户端直接给的就是 IP。
+  # 🔴 这里【不能加 no-resolve】—— 加了会导致带域名的连接直接跳过这条规则，
+  #    结果国内网站全部落到 MATCH 走代理（实测 www.qq.com 走了日本节点）。
+  - GEOIP,CN,DIRECT
+
+  # 兜底。MATCH 匹配一切，必须是最后一条，否则后面的规则都是死代码。
+  - MATCH,PROXY

@@ -1,6 +1,6 @@
 # 02 · config
 
-← [02 · 旁路由](../README.md)
+← [02 · 旁路由](../README.md)　|　机制说明 → [原理](../principles.md)
 
 mihomo 的配置。**模板进 git，机密不进。**
 
@@ -10,21 +10,51 @@ mihomo 的配置。**模板进 git，机密不进。**
 
 | 文件 | git | 说明 |
 |---|---|---|
-| `config.yaml.tmpl` | ✅ | 配置模板，占位符 `${MIHOMO_SECRET}` |
+| `config.yaml.tmpl` | ✅ | 配置模板，占位符 `${MIHOMO_SECRET}` `${SUB_URL_A}` |
 | `mihomo.env.example` | ✅ | 环境变量模板 |
-| `mihomo.local.env` | ❌ | 真实的控制台密码与版本号，权限 `600` |
-| `providers/` | ❌ | 节点文件，含服务器地址和密码 |
+| `mihomo.local.env` | ❌ | 控制台密码与订阅链接，权限 `600` |
+| `providers/` | ❌ | 节点缓存，含服务器地址和密码 |
 | `config.yaml` | ❌ | 渲染产物，含上面两者的内容 |
 
 初始化：
 
 ```bash
-cp mihomo.env.example mihomo.local.env
-chmod 600 mihomo.local.env
-sed -i '' "s|<openssl.*>|$(openssl rand -hex 16)|" mihomo.local.env
+cp mihomo.env.example mihomo.local.env && chmod 600 mihomo.local.env
+# 填入 MIHOMO_SECRET（openssl rand -hex 16）与 SUB_URL_A
 ```
 
-后三项同时被本目录 `.gitignore` 和 [`tools/fleet.sh`](../../tools/) 的 rsync 排除项挡住 —— **两道闸**：git 挡住提交，fleet 挡住广播给所有机器。它们只由部署脚本定向投递给 `vm-router`。
+后三项被**两道闸**挡住：本目录 `.gitignore` 挡住提交，[`tools/fleet.sh`](../../tools/) 的 rsync 排除项挡住广播给所有机器。它们只由部署流程定向投递给 `vm-router`。
+
+---
+
+## 部署流程
+
+```
+改 config.yaml.tmpl（进 git）
+  ↓ 渲染：${...} 换成 mihomo.local.env 里的真值
+config.yaml（本地，gitignore，600）
+  ↓ scp 定向投递
+vm-router:/tmp/
+  ↓ sudo install -m 600
+/etc/mihomo/config.yaml
+  ↓ 🔴 sudo mihomo -t -d /etc/mihomo   校验通过才继续
+  ↓ 生效
+```
+
+### 🔴 两种生效方式，别用错
+
+| 改了什么 | 怎么生效 |
+|---|---|
+| 节点、规则、策略组、DNS 规则、geo 设置 | **热重载**，服务不中断 |
+| `external-ui`、`external-controller`、监听端口、`ipv6` | **必须 `systemctl restart`** —— 启动时注册，热重载不生效 |
+
+```bash
+curl -X PUT -H "Authorization: Bearer <secret>" \
+     -d '{"path":"/etc/mihomo/config.yaml"}' \
+     http://vm-router:9090/configs
+```
+
+热重载成功的判据是 **PID 不变**。开了 DNS 服务之后，`restart` 的几秒会让全家 DNS 中断，所以**能热重载的绝不 restart**。
 
 ---
 
@@ -32,161 +62,122 @@ sed -i '' "s|<openssl.*>|$(openssl rand -hex 16)|" mihomo.local.env
 
 ```
 /etc/mihomo/
-├── config.yaml       主配置，权限 600
-├── providers/        节点文件
-├── ruleset/          规则集缓存
-├── ui/               Web 面板静态文件
-└── cache.db          fake-ip 映射与会话缓存，运行时自动生成
+├── config.yaml        主配置，600
+├── providers/         节点缓存，mihomo 自己写
+├── ruleset/           规则集缓存
+├── ui/                metacubexd 静态文件，158 个文件 8.1 MB
+├── geoip.metadb       7.6 MB   IP → 国家
+├── GeoSite.dat        4.1 MB   域名分类，cn 类 111,097 条
+└── cache.db           fake-ip 映射、selector 选择、会话缓存
 ```
 
 ---
 
-## 当前配置各段
+## 配置各段
 
-| 段 | 值 | 为什么 |
+### 基础
+
+| 配置 | 值 | 为什么 |
 |---|---|---|
-| `mixed-port: 7890` | HTTP + SOCKS5 共用 | 少开一个端口 |
-| `allow-lan: true` | 允许局域网连入 | **旁路由必须开**，否则只有本机能用 |
-| `mode: rule` | 按规则分流 | 另有 `global`（全部走代理）/ `direct`（全部直连），用于排障时快速切换 |
-| `external-controller: 0.0.0.0:9090` | 控制接口 | **热重载与 Web 面板都靠它** |
-| `secret` | 控制台密码 | 🔴 不设则局域网内任何人都能改配置、看全部连接 |
+| `mixed-port` | `7890` | HTTP + SOCKS5 共用，少开一个端口 |
+| `allow-lan` | `true` | **旁路由必须开**，否则只有本机能用 |
+| `mode` | `rule` | 另有 `global` / `direct`，排障时快速切换，见[原理 · 三种模式](../principles.md#4-三种模式) |
+| `external-controller` | `0.0.0.0:9090` | 热重载与面板都靠它 |
+| `secret` | 随机 32 位 | 🔴 不设则局域网内任何人都能改配置、看全部连接。验证：不带 `Authorization` 请求应返回 **401** |
+| `external-ui` | `/etc/mihomo/ui` | 面板。改了要 restart |
 
-验证 `secret` 生效：不带 `Authorization` 头请求应返回 **401**。
+### 🔴 `ipv6: false`
+
+两个作用：
+
+| # | |
+|---|---|
+| 1 | **拉订阅走 IPv4**，命中机场的 IP 白名单。默认按 RFC 6724 优先 IPv6，会带着 `240e:...` 出去被 403 拒绝 |
+| 2 | **DNS 不返回 AAAA**，客户端不会尝试 IPv6 直连绕过代理 —— 分流泄漏从源头消失 |
+
+**副作用**：`DIRECT` 只走 IPv4。实测清华镜像拒绝本地 IPv4 而接受 IPv6，所以设备走旁路由后清华镜像连不上。处理见 [坑 9](../README.md#9--ipv6-false-的真实副作用清华镜像连不上)。
+
+### `profile.store-selected: true`
+
+**默认 `false`** —— 面板上手动选的节点只存在内存，重启回到第一个候选。开这项才写入 `cache.db`。
+
+### Geo 数据库
+
+```yaml
+geo-auto-update: true
+geo-update-interval: 12
+geox-url:
+  geoip:   "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  mmdb:    "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+  geosite: "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  asn:     "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
+```
+
+🔴 **`geox-url` 必须显式配** —— mihomo 默认用 `raw.githubusercontent.com`，国内不可达，会导致进程 fatal 退出。详见[原理 · Geo 数据库](../principles.md#8-geo-数据库)。
+
+按需下载：只有规则实际用到的库才会拉。当前用了 `GEOSITE` + `GEOIP`，所以下了前两个。
+
+### 节点来源
+
+```yaml
+proxy-providers:
+  airport-a:
+    type: http
+    url: "${SUB_URL_A}"
+    path: ./providers/airport-a.yaml    # 相对 -d 目录
+    interval: 86400
+    health-check:
+      enable: true                      # url-test 组必须有它
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+```
+
+**拉取失败时继续用旧缓存**，只记 warning —— 订阅出问题不会导致 mihomo 起不来。这与"整份 config.yaml 被外部工具覆盖"是完全不同的风险级别。
+
+`type: file` 用于本地节点文件（自建节点、手工维护的列表）。格式判断：
+
+```bash
+grep -c '^proxies:' <文件>      # 1 = Clash 格式可直接用，0 = 需转换
+```
+
+### 策略组
+
+```yaml
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [自动选择, DIRECT]
+    use: [airport-a]              # 39 个节点全部列为候选 → 共 41 个
+
+  - name: 自动选择
+    type: url-test
+    use: [airport-a]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50                 # 延迟差 50ms 内不切换，避免来回抖动
+```
+
+分两层的收益见[原理 · 策略组](../principles.md#2-策略组)：**规则与节点解耦** + **`DIRECT` 作为逃生开关**。
+
+### 规则
+
+```yaml
+rules:
+  - GEOSITE,cn,DIRECT     # 域名维度，不需解析，快且准
+  - GEOIP,CN,DIRECT       # IP 维度兜底，允许解析
+  - MATCH,PROXY           # 兜底，必须最后
+```
+
+🔴 **`GEOSITE` 必须在 `GEOIP` 前面**，且 **`GEOIP` 不能加 `no-resolve`** —— 加了会导致带域名的连接跳过该规则，国内流量全部落到 `MATCH` 走代理。实测踩过，详见[原理 · 规则](../principles.md#3-规则)。
 
 ---
 
 ## 演进路线
 
-### ③ 节点：`proxy-providers` 用 `type: file`
-
-节点来自本地文件而非订阅链接，所以用 `type: file` 而不是 `type: http`：
-
-```yaml
-proxy-providers:
-  机场A:
-    type: file
-    path: ./providers/a.yaml
+```
+□ TUN + auto-redirect      客户端不用手动设代理
+□ DNS fake-ip              TUN 模式下才能用 GEOSITE 规则
+□ 精细分流                 YouTube / AI / 流媒体 分别走不同节点
 ```
 
-🔴 **先确认格式**：Surge 和 Clash 的节点写法完全不同。
-
-```bash
-grep -c '^proxies:' <文件>      # 1 = Clash 格式可直接用；0 = Surge 格式需转换
-```
-
-### ③ 分流：三层结构
-
-```
-proxies / proxy-providers     节点（单个服务器）
-        ↓
-proxy-groups                  策略组（一组节点 + 怎么选）
-        ↓
-rules                         规则（什么流量 → 哪个策略组）
-```
-
-**规则指向策略组而不是节点** —— 这层间接让你换节点时不用动规则。
-
-| 策略组类型 | 行为 | 适合 |
-|---|---|---|
-| `select` | 手动选 | 想自己掌控的分组 |
-| `url-test` | 自动选延迟最低 | 日常上网 |
-| `fallback` | 按顺序，前面不通用后面 | **节点层的故障转移** |
-| `load-balance` | 多节点分摊 | 大流量下载 |
-
-不同流量走不同出口：
-
-```yaml
-rules:
-  # 🔴 顺序匹配，第一条命中即停，细的写前面
-  - RULE-SET,youtube,落地A
-  - RULE-SET,google,落地B
-  - GEOIP,CN,DIRECT
-  - MATCH,落地B          # 兜底，必须最后
-```
-
-🔴 **别手写域名列表**。YouTube 的视频流走 `googlevideo.com`、缩略图走 `ytimg.com`、登录走 `accounts.google.com` —— 只写 `youtube.com` 的话**页面能开但视频卡，且查不出原因**。用 MetaCubeX 的 geosite 规则集，边角域名都收全了且持续更新。
-
-### ⑥ TUN
-
-```yaml
-tun:
-  enable: true
-  stack: mixed          # TCP 走内核栈（快），UDP 走 gvisor（兼容）
-  auto-route: true      # 自动接管本机路由表
-  auto-redirect: true   # 🔴 自动写 nftables，劫持【转发流量】
-```
-
-🔴 **`auto-redirect` 是旁路由能成立的关键**。别的机器把网关指过来，那些流量对 mihomo 是**"转发"而不是"本机发出"**，`auto-route` 管不到。没有它就得手写 nftables + 策略路由。
-
-这也是 [`init-clone.sh --router`](../../01-infrastructure/scripts/) 提前关掉 `rp_filter` 的原因 —— TUN 会制造不对称路径。
-
-### ⑦ DNS：fake-ip，不做兜底
-
-```yaml
-dns:
-  enable: true
-  listen: 0.0.0.0:53
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  fake-ip-filter:              # 🔴 这些【不做】fake-ip
-    - '*.lan'
-    - '+.home'                 # 光猫的 zte.home
-    - 'vm-*'
-    - 'pve*'
-  nameserver: [223.5.5.5, 119.29.29.29]
-  proxy-server-nameserver: [223.5.5.5]   # 解析代理服务器自身域名，必须直连
-```
-
-**fake-ip 机制**：海外域名不做真实解析，直接返回 `198.18.x.x` 假地址；客户端往假地址发包进 TUN，mihomo 反查回域名，把**域名**交给代理出口解析。**海外域名全程不在国内解析，从根本上绕开污染。**
-
-`fake-ip-filter` 是为了避免内网设备被假地址化 —— 未过滤时 `ping zte.home` 会解析到 `198.18.4.51`。
-
-**不做兜底**（刻意的选择）：
-
-```
-路由器 DNS      = 192.168.5.2
-路由器备用 DNS  = 留空
-```
-
-| | 后果 |
-|---|---|
-| 填备用 DNS | mihomo 挂了 → 客户端悄悄用公共 DNS → **能上网但分流失效**，海外站点变慢，**察觉不到** |
-| 留空 | mihomo 挂了 → DNS 立刻全失败 → **30 秒内就知道** |
-
-⚠️ 代价：**mihomo 重启的几秒内全家 DNS 中断**。所以改配置必须用**热重载**，不能 `systemctl restart`：
-
-```bash
-curl -X PUT -H "Authorization: Bearer <secret>" \
-     http://vm-router:9090/configs -d '{"path":"/etc/mihomo/config.yaml"}'
-```
-
----
-
-## 自愈分层
-
-| 层 | 故障 | 频率 | 对策 | 恢复 |
-|---|---|---|---|---|
-| **L0 配置** | 订阅更新拉到坏配置 | **最常见** | `mihomo -t -d` 校验通过才替换，否则保留旧配置并告警 | 不发生 |
-| **L1 进程** | mihomo 崩溃 | 常见 | systemd `Restart=always` `RestartSec=3` | 3 秒 |
-| **L2 虚拟机** | VM 卡死 / 被误关 | 偶尔 | 宿主机看门狗：`qm status` 为 stopped 就 `qm start` | 30–90 秒 |
-| **L3 宿主机** | PVE 崩 / 重启 | 罕见 | `onboot=1` + `startup order=1,up=30` | 2–3 分钟 |
-| **L4 断电** | 停电 | 罕见 | BIOS「断电后恢复 = 电源开启」 | 来电后 2–3 分钟 |
-
-**明确不做**：keepalived 降级备机。既然要求"挂了就挂了、不要悄悄降级"，它的核心价值（降级可用）就没了；而真正的双活热备要处理配置同步，且两台都在同一宿主机上防不了 L3。等 X99 节点上线，把第二台放到另一台物理机才有意义。
-
----
-
-## 逃生通道
-
-**路由器管理页永远可达** —— `192.168.5.1` 与设备同网段，二层直连，**不经过网关**。所以哪怕旁路由死透：
-
-```
-1. 手机连家里 Wi-Fi
-2. 浏览器打开 http://192.168.5.1
-3. DHCP 设置里把网关和 DNS 都改回 192.168.5.1
-4. 设备关掉再打开 Wi-Fi
-```
-
-🔴 建议打印一张贴在路由器上 —— 你可能正在上班，家里人要能自救。
-
-⚠️ 光猫当前 DHCP 租期是 **604800 秒（7 天）**，意味着改回配置后常开设备最坏 **3.5 天**才生效。**改成 7200 秒（2 小时）**，恢复窗口缩到 1 小时。这是零风险改动，切全局之前必须先做。
+三者的机制见[原理](../principles.md)。精细分流的要点：**别手写域名列表**，用 MetaCubeX 的 geosite 规则集 —— YouTube 的视频流走 `googlevideo.com`、缩略图走 `ytimg.com`，手写必漏，表现是"页面能开但视频卡"且查不出原因。
