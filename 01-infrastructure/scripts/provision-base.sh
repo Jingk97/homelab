@@ -25,6 +25,23 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────
+# 失败定位
+# ──────────────────────────────────────────────────────────────
+# set -e 在函数里触发时是【静默】终止的：脚本走到一半突然没了，
+# 不打印任何原因，排查时只能靠二分注释。
+# set -E 让 ERR trap 在函数 / 子 shell / 命令替换里也生效，
+# 配合下面这行就能把"突然没了"变成"第 N 行失败，退出码 X"。
+_on_err() {
+  local rc=$?
+  # BASH_LINENO[0] 是【调用方】的行号，也就是真正出错那一行；
+  # 在函数里用 $LINENO 只会得到本函数自己的行号，没有意义。
+  printf '\033[1;31m\n  [中断] 第 %s 行执行失败，退出码 %s\n\033[0m\n' \
+    "${BASH_LINENO[0]}" "$rc" >&2
+}
+set -E
+trap _on_err ERR
+
+# ──────────────────────────────────────────────────────────────
 # 全局变量
 # ──────────────────────────────────────────────────────────────
 readonly MIRROR_HOST="mirrors.tuna.tsinghua.edu.cn"
@@ -464,7 +481,7 @@ m6_golang() {
   if [[ "$have" == "$want" ]]; then
     skip "Go 已是最新稳定版 $have"
   else
-    info "安装 Go $want（当前：${have:-未安装}）"
+    info "安装 Go ${want}（当前：${have:-未安装}）"
     local tgz="/tmp/${want}.linux-amd64.tar.gz"
     # 同样：中国站点直连，失败才用代理回退 go.dev
     if ! curl -fsSL --connect-timeout 30 "https://golang.google.cn/dl/${want}.linux-amd64.tar.gz" -o "$tgz"; then

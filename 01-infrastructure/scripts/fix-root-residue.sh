@@ -33,6 +33,23 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────
+# 失败定位
+# ──────────────────────────────────────────────────────────────
+# set -e 在函数里触发时是【静默】终止的：脚本走到一半突然没了，
+# 不打印任何原因，排查时只能靠二分注释。
+# set -E 让 ERR trap 在函数 / 子 shell / 命令替换里也生效，
+# 配合下面这行就能把"突然没了"变成"第 N 行失败，退出码 X"。
+_on_err() {
+  local rc=$?
+  # BASH_LINENO[0] 是【调用方】的行号，也就是真正出错那一行；
+  # 在函数里用 $LINENO 只会得到本函数自己的行号，没有意义。
+  printf '\033[1;31m\n  [中断] 第 %s 行执行失败，退出码 %s\n\033[0m\n' \
+    "${BASH_LINENO[0]}" "$rc" >&2
+}
+set -E
+trap _on_err ERR
+
+# ──────────────────────────────────────────────────────────────
 # 全局变量
 # ──────────────────────────────────────────────────────────────
 # 体检的对象是【日常使用的那个普通账号】，不是当前执行者。
@@ -263,18 +280,18 @@ m3_check_system() {
   v="$(. /etc/os-release && echo "$PRETTY_NAME")"
   case "$v" in
     *24.04*) ok "系统版本" "$v" ;;
-    *)       soso "系统版本" "$v（脚本按 24.04 设计）" ;;
+    *)       soso "系统版本" "${v}（脚本按 24.04 设计）" ;;
   esac
 
   v="$(timedatectl show -p Timezone --value)"
-  [[ "$v" == "Asia/Shanghai" ]] && ok "时区" "$v" || bad "时区" "$v（应为 Asia/Shanghai）"
+  [[ "$v" == "Asia/Shanghai" ]] && ok "时区" "$v" || bad "时区" "${v}（应为 Asia/Shanghai）"
 
   v="$(timedatectl show -p NTPSynchronized --value)"
-  [[ "$v" == "yes" ]] && ok "NTP 时间同步" "yes" || soso "NTP 时间同步" "$v（刚开机可能还没同步上）"
+  [[ "$v" == "yes" ]] && ok "NTP 时间同步" "yes" || soso "NTP 时间同步" "${v}（刚开机可能还没同步上）"
 
   # 默认 target 必须是 multi-user：graphical 会拉起 Xorg 白占内存。
   v="$(systemctl get-default)"
-  [[ "$v" == "multi-user.target" ]] && ok "默认 target" "$v" || bad "默认 target" "$v（应为 multi-user.target）"
+  [[ "$v" == "multi-user.target" ]] && ok "默认 target" "$v" || bad "默认 target" "${v}（应为 multi-user.target）"
 
   # apt 源：PVE 9 / Ubuntu 24.04 用 deb822 格式的 .sources，不是老的 .list
   if grep -qs 'mirrors\.tuna\.tsinghua\.edu\.cn' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; then
