@@ -227,7 +227,24 @@ proxy-groups:
 
 # ── 规则（顺序匹配，第一条命中即停）────────────────────────
 rules:
-  # ── AI 服务（最高优先级，只走自建线路，失败即 REJECT）──
+  # ── ① 代理服务器自身：必须直连 ──────────────────────────
+  # 🔴 这条不是优化，是防「代理套代理」。局域网设备（例如 Mac 上常开的 Surge）
+  #    去连自建服务器时，包一定先到 mihomo —— 它是全网关，绕不过去。
+  #    若不显式放行，就会落到最后的 MATCH,PROXY：
+  #        Surge 的隧道 → 再被订阅节点套一层 → 延迟叠加 + 订阅流量按倍率白扣
+  #    实测抓到过 update.code.visualstudio.com 走 [Lv3·2.0x] 节点，双倍计费。
+  #
+  # 🔴 加这条之前，它是【靠巧合】走对的：自建服务器用的是 .cn 域名，
+  #    碰巧命中下面的 GEOSITE,cn,DIRECT（该类别包含整个 .cn 顶级域）。
+  #    一旦换成 .com / .net 域名立刻破功，而且【不报任何错】，极难发现。
+  - DOMAIN,${SELF_SERVER},DIRECT
+  # IP 维度双保险：客户端自带 DNS（Surge 的 fake-ip、DoH、写死 IP 的 App）
+  # 不经过 mihomo 解析，这时只能按目标 IP 命中。
+  # no-resolve = 不为这条规则触发 DNS 解析（本来就是纯 IP，解析无意义还拖慢）。
+  # 🔴 换 VPS / 换 IP 后必须同步改 mihomo.local.env 里的 SELF_SERVER_IP。
+  - IP-CIDR,${SELF_SERVER_IP}/32,DIRECT,no-resolve
+
+  # ── ② AI 服务（最高优先级，只走自建线路，失败即 REJECT）──
   # 以下来自 Surge rules-main.dconf 的 ChatGPT / claude 两段，原样迁移
   - DOMAIN,api.statsig.com,AI服务
   - DOMAIN,browser-intake-datadoghq.com,AI服务
