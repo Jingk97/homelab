@@ -10,7 +10,8 @@ mihomo 的配置。**模板进 git，机密不进。**
 
 | 文件 | git | 说明 |
 |---|---|---|
-| `config.yaml.tmpl` | ✅ | 配置模板，占位符 `${MIHOMO_SECRET}` `${SUB_URL_A}` |
+| `config.yaml.tmpl` | ✅ | 配置模板，占位符 `${MIHOMO_SECRET}` `${SUB_URL_A}` `${SELF_SERVER}` `${SELF_SERVER_IP}` … |
+| `render.sh` | ✅ | 渲染脚本，把占位符换成真值 |
 | `mihomo.env.example` | ✅ | 环境变量模板 |
 | `mihomo.local.env` | ❌ | 控制台密码与订阅链接，权限 `600` |
 | `providers/` | ❌ | 节点缓存，含服务器地址和密码 |
@@ -31,15 +32,34 @@ cp mihomo.env.example mihomo.local.env && chmod 600 mihomo.local.env
 
 ```
 改 config.yaml.tmpl（进 git）
-  ↓ 渲染：${...} 换成 mihomo.local.env 里的真值
+  ↓ ./render.sh
 config.yaml（本地，gitignore，600）
-  ↓ scp 定向投递
-vm-router:/tmp/
-  ↓ sudo install -m 600
-/etc/mihomo/config.yaml
-  ↓ 🔴 sudo mihomo -t -d /etc/mihomo   校验通过才继续
-  ↓ 生效
+  ↓ scp 投递到 vm-router:/tmp/mihomo-new.yaml
+  ↓ 🔴 sudo mihomo -t -f /tmp/mihomo-new.yaml -d /etc/mihomo
+  ↓    校验【新文件】—— 不过就中止，线上配置一个字节都不动
+  ↓ 备份现有配置 → sudo install -m 600 覆盖
+  ↓ 热重载
 ```
+
+🔴 **校验必须在覆盖【之前】做。** 早期写法是先覆盖再 `mihomo -t -d /etc/mihomo` —— 那时坏配置已经就位，进程一旦因任何原因重启就直接起不来。用 `-f` 指定新文件、`-d` 沿用现有 geo 数据，就能在不碰线上文件的前提下完整校验。
+
+### `render.sh`
+
+```bash
+./render.sh           # 渲染出 config.yaml（600）
+./render.sh --check   # 只校验不写文件
+```
+
+退出码 `0/1` 就是机器可判定的验证信号。四个模块：前置检查（含**机密文件权限必须 600**）→ 载入变量 → 替换 → 校验无残留占位符 → 落盘。
+
+🔴 **两个刻意的实现选择**：
+
+| | |
+|---|---|
+| 不用 `envsubst` | ① macOS 不自带（属于 gettext），脚本会因机器而异；② 不带参数的 `envsubst` 会替换**所有** `$xxx`，配置里任何一个裸 `$` 都可能被误伤。脚本里显式列出白名单，替换范围可控 |
+| 替换用 python 不用 `sed` | 订阅链接含 `? & = /`，Trojan 密码可能含 `/ & \` —— 这些在 sed 的替换串里全是元字符，会被解释掉或直接报错。python 的 `str.replace` 是字面替换 |
+
+M3 的"无残留占位符"校验不是形式主义：**漏一个 `${XXX}` 出去，mihomo 会把它当字面量吃下去** —— 比如 `server` 变成字符串 `"${SELF_SERVER}"`，启动不报错但连不上，排查极其费劲。
 
 ### 🔴 两种生效方式，别用错
 
@@ -96,6 +116,16 @@ curl -X PUT -H "Authorization: Bearer <secret>" \
 | 2 | **DNS 不返回 AAAA**，客户端不会尝试 IPv6 直连绕过代理 —— 分流泄漏从源头消失 |
 
 **副作用**：`DIRECT` 只走 IPv4。实测清华镜像拒绝本地 IPv4 而接受 IPv6，所以设备走旁路由后清华镜像连不上。处理见 [坑 9](../README.md#9--ipv6-false-的真实副作用清华镜像连不上)。
+
+### 运行调优相关的项
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| `find-process-mode` | `off` | 这台机器只做转发，处理的是**别的设备**的流量 —— 进程归属查询在本机永远查不到，却要为每条连接付一次查表开销 |
+| `tcp-concurrent` | `true` | 对解析出多个 IP 的域名并发握手取最快，降低建连延迟 |
+| `profile.store-fake-ip` | `true` | fake-ip 映射持久化到 `cache.db`。不开的话重载后映射清空，客户端拿着旧的 `198.18.x.x` 打过来会反查不到域名 → `[UDP] Resolve Ip error`，连接直接失败 |
+
+完整的调优清单（内核参数、服务优先级、日志保留）在 [02 · 旁路由 · 运行调优](../README.md#运行调优)。
 
 ### `profile.store-selected: true`
 
