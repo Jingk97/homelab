@@ -286,14 +286,31 @@ FallbackDNS=180.76.76.76 114.114.114.114"; then
     skip "DNS 配置无变化"
   fi
 
-  # ── journald 日志限制 ─────────────────────────────────
+  # ── journald 日志保留策略 ─────────────────────────────
   # 默认无上限，长期运行能吃掉几个 GB。小磁盘虚拟机必须限。
-  if write_if_changed /etc/systemd/journald.conf.d/10-size-limit.conf \
+  #
+  # 🔴 早期版本只写了 SystemMaxUse/SystemMaxFileSize/SystemMaxFiles=10，实测踩坑：
+  #    journald 的清理是【多个上限取先到者】，而 SystemMaxFiles=10 这一条
+  #    远比时间和容量先触发 —— 结果保留时长完全不可预测，
+  #    实测一台每天写 28MB 日志的网关只剩下【不到 1 天】的记录。
+  #    换文件名的同时必须删掉旧 drop-in，否则两个文件的同名键会打架。
+  sudo rm -f /etc/systemd/journald.conf.d/10-size-limit.conf
+  if write_if_changed /etc/systemd/journald.conf.d/10-retention.conf \
 "[Journal]
-SystemMaxUse=500M
-SystemMaxFileSize=50M
-SystemMaxFiles=10"; then
-    info "journald 上限设为 500M，重启 systemd-journald"
+Storage=persistent
+# 时间上限。家用无审计合规要求，15 天足够回溯「上周开始变慢」这类问题。
+MaxRetentionSec=15day
+# 容量上限。实测网关类机器 log-level=info 下约 28MB/天，15 天约 430MB，留一倍余量。
+SystemMaxUse=1G
+# 磁盘保底剩余：就算没触发上面两条，也绝不把磁盘写满。
+SystemKeepFree=2G
+# 🔴 每天切一个新文件。journald 只能【整文件删除】——
+#    一个文件若横跨 5 天，MaxRetentionSec 得等它【最新】那条也过期才删得掉，
+#    实际保留时长会远超设定值。按天切，时间上限才精确。
+MaxFileSec=1day
+SystemMaxFileSize=64M
+SystemMaxFiles=100"; then
+    info "journald 保留策略：15 天 / 1G 上限，重启 systemd-journald"
     sudo systemctl restart systemd-journald
   else
     skip "journald 配置无变化"

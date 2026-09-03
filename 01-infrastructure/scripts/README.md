@@ -55,7 +55,7 @@ SKIP_LANG=1   ./provision-base.sh                   # 跳过语言运行时
 |---|---|
 | M0 | 拒绝 root、系统版本、sudo、代理设置、**GitHub 与镜像站连通性预检** |
 | M1 | apt 换清华镜像（deb822）+ 全量更新 |
-| M2 | 时区 / NTP / DNS 兜底 / journald 限 500M / locale / sudo 免密 |
+| M2 | 时区 / NTP / DNS 兜底 / **journald 保留 15 天上限 1G** / locale / sudo 免密 |
 | M3 | 运维工具：htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux |
 | M4 | 研发工具：git build-essential jq ripgrep fd bat yq |
 | M5 | Python：系统 python3 + venv + pipx + **uv** |
@@ -140,7 +140,7 @@ Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InReleas
 |---|---|
 | 1 | **SSH 主机密钥重建兜底服务** —— "首次启动会自动重新生成"依赖 cloud-init 恰好跑起来；没跑的话 `sshd` 起不来，只能靠 noVNC 抢救 |
 | 2 | **cloud-init 数据源检测** —— ISO 安装器写的 `datasource_list: [None]` 会让 Proxmox 的 Cloud-Init 标签页**填了完全不生效且无报错** |
-| 3 | **日志清理排除 `/var/log/journal`** —— 那是二进制文件，截断成 0 会让 journald 报错 |
+| 3 | 🔴 **journal 目录直接删除，不靠 `--vacuum`** —— `journalctl --vacuum-time` 只作用于**已归档**文件且是异步的，实测会漏掉一整批。漏掉的后果不只是占空间，更是**去身份化的漏网**：journal 里带着源机器的 `_MACHINE_ID`、历次主机名、IP、SSH 登录记录。文本日志仍用 `truncate` 并排除 `/var/log/journal`（二进制文件截断成 0 会让 journald 报错），journal 目录另行 `rm -rf`，journald 下次启动按新 machine-id 自动重建 |
 | 4 | **用户 SSH 私钥检测** —— 按文件内容（首行 `-----BEGIN ... PRIVATE KEY-----`）识别；**只告警不自动删**，因为也可能是故意放的 |
 
 ---
@@ -187,6 +187,25 @@ Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InReleas
 四个脚本都装了 ERR trap，把"脚本突然没了"变成 `[中断] 第 N 行执行失败，退出码 X`。
 
 > trap 报的是 **`set -e` 终止的位置**（函数调用点），不一定是根因那一行 —— 函数末尾语句返回非 0 时，错误在调用点才被捕获。这是 bash 的机制限制。
+
+---
+
+### 🔴 journald 的保留策略：文件数上限是隐形的先决条件
+
+早期 `provision-base.sh` 只写了 `SystemMaxUse=500M` + `SystemMaxFiles=10`。journald 的清理是**多个上限取先到者**，文件数这条远比时间和容量先触发 —— 实测一台每天写 28MB 日志的网关只剩**不到 1 天**的记录。
+
+现在的策略是时间 + 容量 + 磁盘保底三条都设，并且 `MaxFileSec=1day`：
+
+```ini
+MaxRetentionSec=15day
+SystemMaxUse=1G
+SystemKeepFree=2G
+MaxFileSec=1day          # 🔴 journald 只能整文件删除
+SystemMaxFileSize=64M
+SystemMaxFiles=100
+```
+
+`MaxFileSec` 不是可选项 —— 一个文件若横跨 5 天，`MaxRetentionSec` 得等它**最新**那条也过期才删得掉，实际保留会远超设定值。
 
 ---
 

@@ -494,6 +494,15 @@ m6_cleanup() {
   info "清空 journal"
   run sudo journalctl --rotate
   run sudo journalctl --vacuum-time=1s
+  # 🔴 上面两条【不够】。--vacuum-time 只作用于【已归档】的文件，而且是异步的
+  #    （systemd 官方文档明确写明这一点）。实测它会漏掉一整批，后果有两层：
+  #      ① 模板源机器的 journal 被原样克隆进每一台新机器，占着 SystemMaxFiles
+  #         名额把新日志挤掉 —— 实测新机器只保留了不到 1 天的日志
+  #      ② 🔴 更严重：这是【去身份化的漏网】。journal 里带着源机器的
+  #         _MACHINE_ID、历次主机名（vm-test → ubuntu-tmpl）、IP、SSH 登录记录，
+  #         而这些正是本脚本要抹掉的东西。
+  #    所以直接删目录 —— journald 下次启动会按新的 machine-id 自动重建。
+  run sudo sh -c 'rm -rf /var/log/journal/* /run/log/journal/*'
 
   # 🔴 排除 /var/log/journal：那里是 journald 的二进制文件，
   #    truncate 成 0 会让 journald 报错（上面的 vacuum 已经处理过它们了）。
