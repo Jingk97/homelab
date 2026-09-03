@@ -17,7 +17,7 @@
 | 项 | 值 |
 |---|---|
 | 机器 | `vm-router` @ `192.168.5.2`，VMID `102` |
-| 规格 | 1 核 / 1 GB / 50 GB（thin，实占约 5 GB） |
+| 规格 | 1 核 / 1 GB / 50 GB（thin，实占约 5 GB）—— 见「运行调优 · 为什么不扩内存」 |
 | 自启 | `onboot=1`，`startup order=1,up=30`（第一批启动，其他机器依赖网络） |
 | 软件 | mihomo（Clash.Meta 内核）v1.19.30 |
 | 面板 | metacubexd v1.273.0 @ `http://vm-router:9090/ui` |
@@ -688,6 +688,118 @@ App → Surge（本地 TUN 或系统代理）
 
 **建议**：在家关掉设备本地代理，出门再开。Surge 支持按 SSID 自动切换配置文件。保留它的正当理由只有一个 —— 旁路由挂了时的应急通道，那时手动开即可。
 
+### 18 · 🔴 自建服务器"碰巧"直连，靠的是 `.cn` 后缀
+
+局域网设备（例如 Mac 上常开的 Surge）去连自建服务器时，包**必然先经过 mihomo** —— 它是全网关，绕不过去。规则表里若没有放行，就会落到 `MATCH,PROXY`：**Surge 的隧道再被订阅节点套一层**，延迟叠加、订阅流量按倍率白扣。
+
+实测在 `/connections` 里抓到过 `update.code.visualstudio.com → [Lv3·2.0x] 美国LA02` —— Surge 判定直连的境外流量，被 mihomo 抓去走了 2.0 倍率节点。**两边各自"正确"，合起来是双倍计费。**
+
+但奇怪的是自建服务器本身走的是 `DIRECT`。查规则表发现**根本没有为它写过任何规则** —— 整张表里只有两条产生 DIRECT：`GEOSITE,cn` 和 `GEOIP,CN`。而服务器 IP 是境外的，`GEOIP,CN` 不可能命中。
+
+**唯一的解释：`GEOSITE,cn` 包含整个 `.cn` 顶级域，而自建服务器用的正是 `.cn` 域名。**
+
+🔴 这是巧合，不是设计。换成 `.com` / `.net` 域名立刻破功，**而且不报任何错**，只会悄悄多绕一跳。
+
+已加显式规则，排在规则表**最前**：
+
+```yaml
+rules:
+  - DOMAIN,${SELF_SERVER},DIRECT
+  # IP 维度双保险：客户端自带 DNS（Surge 的 fake-ip、DoH、写死 IP 的 App）
+  # 不经过 mihomo 解析，这时只能按目标 IP 命中。
+  - IP-CIDR,${SELF_SERVER_IP}/32,DIRECT,no-resolve
+```
+
+这条规则的首要目的其实**不是省一跳，是防环** —— mihomo 自己也要连自建服务器（`AI服务 → 自建线路 → Trojan-3xUI`），而 TUN 的 `auto-route` 会把出站流量抓进 TUN。mihomo 对**自己的**出站有内建防环，但对**转发的**流量完全依赖规则表。
+
+---
+
+### 19 · 🔴 `SystemMaxFiles=10` 让日志保留时长完全不可预测
+
+`provision-base.sh` 早期版本只写了容量和文件数：
+
+```ini
+SystemMaxUse=500M
+SystemMaxFiles=10      # 🔴 罪魁
+```
+
+journald 的清理是**多个上限取先到者**（容量 / 文件数 / 时间 / 磁盘保底剩余），任何一条先触发就开始删最老的。文件数这条**远比时间和容量先触发** —— 实测一台每天写 28MB 日志的网关，只剩下**不到 1 天**的记录。
+
+🔴 而且**只设时间不设容量会撑爆磁盘，只设容量不设时间则保留时长随日志量浮动** —— 两个必须都设。
+
+另有一个容易漏的点：**journald 只能整文件删除**。一个文件若横跨 5 天，`MaxRetentionSec` 得等它**最新**那条也过期才删得掉，实际保留会远超设定值。所以 `MaxFileSec=1day` 不是可选项 —— 按天切，时间上限才精确。
+
+---
+
+### 20 · 🔴 `journalctl --vacuum` 漏掉 journal —— 去身份化的漏网
+
+`sysprep.sh` 原本靠这两条清日志：
+
+```bash
+journalctl --rotate
+journalctl --vacuum-time=1s
+```
+
+🔴 **`--vacuum-time` 只作用于【已归档】的文件，而且是异步的**（systemd 官方文档明确写明）。实测漏掉一整批。
+
+发现方式：在 `vm-router` 上看到两个 journal 目录 ——
+
+```
+/var/log/journal/05abd2347b4e...  48M   ← 模板源机器的 machine-id
+/var/log/journal/0b5c7540ba8a...  25M   ← 本机自己的
+```
+
+打开那 48M 一看，从 `vm-test` 的内核启动一路记到 `ubuntu-tmpl` 的 `Journal stopped`（就是 sysprep 结束关机那一刻）。后果两层：
+
+| | |
+|---|---|
+| 空间 | 孤儿文件占着 `SystemMaxFiles` 名额，把新日志挤掉 |
+| 🔴 **身份** | journal 里带着源机器的 `_MACHINE_ID`、历次主机名、IP、SSH 登录记录 —— **正是 sysprep 要抹掉的东西** |
+
+修法是直接删目录，journald 下次启动会按新的 machine-id 自动重建：
+
+```bash
+rm -rf /var/log/journal/* /run/log/journal/*
+```
+
+---
+
+### 21 · 🔴 备份文件放进 `/etc/logrotate.d/` 会让整个 logrotate 失效
+
+改 `/etc/logrotate.d/rsyslog` 之前顺手备份，备份放在了同一个目录：
+
+```
+error: rsyslog.bak-20260903:1 duplicate log entry for /var/log/syslog
+退出码 1
+```
+
+**logrotate 读 `/etc/logrotate.d/` 下的所有文件，不看扩展名。** 备份被当成第二份配置读入 → 同一个日志有两条规则 → 报错退出 → **一个日志都不会轮转**，比不改还糟。
+
+🔴 同样的坑适用于 `/etc/cron.d/`、`/etc/sudoers.d/`、`/etc/systemd/system/`、`/etc/sysctl.d/`、`/etc/apt/sources.list.d/` —— 这些"扫描整个目录"的地方，**备份必须放到目录外**（本仓库统一放 `/var/backups/conf/`）。
+
+---
+
+### 22 · 🔴 `conntrack` 的 established 超时是 5 天
+
+```
+nf_conntrack_tcp_timeout_established = 432000 秒 = 5.0 天
+```
+
+一条 TCP 连接**静默死掉**（手机息屏、Wi-Fi 断开、对端 NAT 超时 —— 这些都不会发 FIN/RST）之后，conntrack 表项还要占 **5 天**。家用场景设备频繁进出，表里堆的绝大多数是**早就不存在的连接**。
+
+**conntrack 会满的真正原因不是并发高，是尸体不清理。**
+
+而表满的表现是最难查的一类：
+
+```
+表满 → 内核【直接丢弃】新连接的第一个包
+     → mihomo 的日志里【什么都没有】（包在内核层就被丢了，根本没到 mihomo）
+     → dmesg 有一行 "nf_conntrack: table full"，但有速率限制，高频丢包时可能一条不打
+     → 用户感受：某个网页突然打不开，过一会儿又好了，无法复现
+```
+
+🔴 降低超时必须**配套改 keepalive**：原本 `tcp_keepalive_time=7200`（2 小时）> 新的 conntrack 超时 3600 秒，会让真正空闲但活着的连接（SSH、MQTT）在保活探测发出**之前**就被 conntrack 丢掉 —— 表现是"SSH 挂着不动一小时就断"。
+
 ---
 
 ## AI 流量泄漏审计
@@ -769,6 +881,225 @@ AI 规则总数从 **90 → 132 条 + 3 个 GEOSITE 类别（226 条）**。
 
 ---
 
+## 运行调优
+
+这台机器的唯一职责是**转发**。原则：系统本身只保留能跑起来的最小面积，资源竞争时一律向 mihomo 倾斜；**在 1 GB 的硬上限内提高承载，而不是靠加内存回避问题**。
+
+### 为什么不扩内存 —— PVE 图表在骗你
+
+PVE 面板上 `vm-router` 的内存曲线一路爬到接近 100%，看起来像内存泄漏。**不是。**
+
+```
+PVE 显示的       VM 内部的真相
+mem  710 MiB     total  894Mi
+                 used   389Mi   ← 真正被程序占的
+                 cache  512Mi   ← 内核拿空闲内存做的缓存，随时可回收
+                 avail  504Mi   ← 真正还能给新程序用的
+```
+
+数字对得上：PVE 的公式是 **`mem = balloon 报的 total_mem − free_mem`**，两次采样都精确吻合到字节。
+
+```
+937,644,032 (total_mem) − 192,675,840 (free_mem) = 744,968,192 = PVE 的 mem
+```
+
+🔴 **这个公式把 page cache 算进了"已用"。** 而 Linux 的设计就是尽量把空闲内存变成缓存（"空闲内存就是浪费的内存"），所以曲线自然一路爬升然后在接近 100% 处平台化。`virtio-balloon` 的统计协议里其实有 `available` 字段，但 PVE 用的是 `free`，这改不了。
+
+**比所有内存数字都权威的判据是 PSI**（Pressure Stall Information，内核直接统计"进程因等资源而被迫停顿的时间占比"）：
+
+```
+pressurememorysome: 0    从没有任何进程因等内存停顿过
+pressurememoryfull: 0
+OOM 事件: 0              swap 3.8G 只用了 256 KiB
+```
+
+`MemAvailable` 告诉你"还剩多少"，**PSI 告诉你"是否已经开始疼"** —— 后者才是要不要加内存的决策依据。所以 `healthcheck.sh` 里的内存判据用 PSI，不用会被 page cache 误导的 `used`。
+
+**结论：1 GB 够用，不因"不够"而扩容。** 若要扩，正确写法是 `memory: 2048` + `balloon: 1024` —— 平时有余量，宿主机紧张时最多回收到 1024（就是今天这个已验证安全的配置），下限有数据支撑而非拍脑袋。
+
+### 收包路径有两层缓冲，别混淆
+
+```mermaid
+flowchart LR
+    NIC["物理网卡<br/>virtio-net"]
+    BL["netdev_max_backlog<br/>1000 → 4096<br/>每 CPU 收包队列"]
+    STACK["内核协议栈 + conntrack<br/>表上限 7168 → 65536<br/>established 超时 5天 → 1小时"]
+    SB["socket 接收缓冲<br/>rmem_max 208K → 8M<br/>全局池 udp_mem 141M 不动"]
+    APP["mihomo<br/>GOMEMLIMIT=600MiB<br/>OOMScoreAdjust=-800"]
+
+    NIC --> BL --> STACK --> SB --> APP
+
+    BL -.-> D1["softnet_stat dropped<br/>实测 0"]
+    STACK -.-> D2["🔴 静默丢包<br/>日志里没有任何记录"]
+    SB -.-> D3["UdpRcvbufErrors<br/>实测 149<br/>UDP 无重传 = 永久丢失"]
+
+    style D2 stroke-dasharray: 4 3
+```
+
+🔴 **`rmem_max` 是单个 socket 的天花板，`udp_mem` 是全局总量池**，两者不冲突：quic-go 要的 7 MB 是单 socket 的事，141 MB 的全局池能装约 20 个这样的 socket。
+
+### 内核参数：两个文件，两类目的
+
+**`/etc/sysctl.d/99-gateway-tuning.conf` —— 缓冲，治丢包**
+
+| 参数 | 默认 → 现在 | 为什么 |
+|---|---|---|
+| `net.core.rmem_max` | 208 K → **8 M** | mihomo 内部的 quic-go 启动时主动申请约 7 MB，旧天花板让它**每次都申请失败**（日志里那条 `failed to sufficiently increase receive buffer size`）。这是上限不是预分配，空 socket 不占内存 |
+| `net.core.rmem_default` | 208 K → **416 K** | 只翻一倍，**不跟着抬到 8 M** —— 它作用在每一个 socket 上，BT 场景下几千个 socket 同时存在，抬太高在最坏情况内存放大过头。真正要大缓冲的 quic-go 会自己 `setsockopt` 申请 |
+| `net.core.wmem_max` | 208 K → 8 M | 发送方向对称 |
+| `net.core.netdev_max_backlog` | 1000 → 4096 | 预防性。实测 `softnet_stat` 的 dropped 与 `time_squeeze` 都是 0，这层还没出过问题 |
+| `net.netfilter.nf_conntrack_max` | 7168 → **65536** | 见坑 22。⚠️ 必须配套改 hashsize |
+
+🔴 **刻意不动 `tcp_mem` / `udp_mem`**（当前 70 MB / 141 MB）：它们是内核按内存算的**全局 socket 缓冲总量**上限，是 OOM 保护线。1 GB 机器上两者合计占 24% 已是合理配比，**调高等于削弱保护**。
+
+**`/etc/modprobe.d/nf_conntrack.conf` —— 哈希桶（不是 sysctl，是模块参数）**
+
+```ini
+options nf_conntrack hashsize=16384
+```
+
+🔴 只把 `nf_conntrack_max` 从 7168 抬到 65536 而不动 hashsize，桶数不变、条目变 9 倍 → **每个桶的冲突链表变长 9 倍 → 每个包的连接查找都要多走这条链 → 转发延迟上升**。经验值 `hashsize ≈ max / 4`。
+
+**`/etc/sysctl.d/99-gateway-capacity.conf` —— 承载，治"表被尸体占满"**
+
+| 参数 | 默认 → 现在 | 为什么 |
+|---|---|---|
+| `nf_conntrack_tcp_timeout_established` | **432000（5天）→ 3600** | 见坑 22，死连接占着表 5 天 |
+| `tcp_keepalive_time` | 7200 → **600** | 🔴 **必须与上条配套**，否则空闲但活着的连接会在保活探测之前被 conntrack 丢掉 |
+| `tcp_keepalive_intvl` / `_probes` | → 30 / 6 | 探测失败后的重试节奏 |
+| `tcp_fin_timeout` | 60 → 30 | 代理机每天开关大量连接，FIN_WAIT2 停留 60 秒偏长 |
+| `tcp_tw_reuse` | 2 → **1** | 2 = 只对 loopback；1 = 对外发连接也复用 TIME_WAIT。靠 TCP 时间戳区分新旧包，对**主动发起连接**的一侧安全 —— 而 mihomo 正是大量主动外连的角色 |
+| `tcp_max_tw_buckets` | 4096 → 32768 | 每槽约 256 字节，32768 约 8 MB |
+| `tcp_max_syn_backlog` | **128 → 4096** | 太小。mihomo 同时监听 7890 / 9090 / 53，突发时 128 个待处理 SYN 极易溢出，溢出即**丢连接** |
+| `vm.swappiness` | 60 → **10** | mihomo 被换出 = 转发延迟尖刺。10 = 优先丢 page cache；swap 保留作为 OOM 前最后一道 |
+
+### 资源向 mihomo 倾斜
+
+`/etc/systemd/system/mihomo.service.d/10-priority.conf`：
+
+| 设置 | 值 | 理由 |
+|---|---|---|
+| `OOMScoreAdjust` | **-800** | 内存真紧张时内核挑谁杀 —— 判断依据是"挂了多严重"：mihomo 挂 = 全家断网；journald / unattended-upgrades 挂 = 只是少个功能 |
+| `MemoryMin` | 192 M | cgroup v2 内存保护：低于这个水位的部分**内核不回收**。实测常驻 86 MB、启动加载 geodata 峰值 149 MB，192 M 完整覆盖峰值 |
+| `CPUWeight` / `IOWeight` | 500 | 默认 100，抢资源时拿约 5 倍份额 |
+| `Nice` | -5 | 转发延迟直接决定体感。保守值：明显优先于普通进程，又不至于饿死内核线程和 sshd |
+| `Environment=GOMEMLIMIT` | **600MiB** | 见下 |
+
+🔴 **`GOMEMLIMIT` 是对"1 GB 上限下的极端情况"最对症的一个。** mihomo 是 Go 程序，默认 `GOGC=100` 的含义是"堆长到上次 GC 后存活对象的 2 倍才回收"——极端情况下（geodata 重载撞上连接数暴涨）堆可能冲得很高才触发 GC。`GOMEMLIMIT` 是**软上限**：接近它时 GC 持续激进运行把内存压回去，**拿 CPU 换内存** —— 正是这台机器该做的取舍（CPU 才用 6%，内存才是瓶颈）。它统计的是 Go 运行时的**全部**内存（堆 + 栈 + 运行时结构）。600 MiB 的来历：894 − 系统约 250 − page cache 余量 ≈ 600。当前实际 86 MB，留了 7 倍余量：平时永不触发，只在极端情况兜底。
+
+⚠️ `Nice` / `OOMScoreAdjust` / `Environment` 都是**进程启动时**设定的，**必须重启进程才生效**。cgroup 类属性（`CPUWeight` / `IOWeight` / `MemoryMin`）可运行时生效，已用 `systemctl set-property --runtime` 先加上。重启 mihomo = 全家 DNS 中断几秒，所以留到下次停机窗口一并生效。
+
+### mihomo 配置层
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| `find-process-mode` | **off** | 这台机器只做转发，处理的是**别的设备**发来的流量 —— 进程归属查询在本机永远查不到（进程在别的机器上），却要为**每一条连接**付出一次查表开销。代价：面板里看不到本机发起连接的进程名，而网关上几乎没有本机连接 |
+| `tcp-concurrent` | true | 对解析出多个 IP 的域名**并发**握手，取最先成功的。直接降低连接建立延迟，尤其是解析出一堆 IP、其中部分不可达的境外域名 |
+| `profile.store-fake-ip` | true | 🔴 把 fake-ip 映射持久化到 `cache.db`。不开的话 mihomo 一重启/重载映射表就清空，而客户端还缓存着旧的 `198.18.x.x`，发过来反查不到域名 → 日志里的 `[UDP] Resolve Ip error: can't resolve ip`，连接**直接失败**。实测这类错误 24 小时内出现过 90 次 |
+| `geodata-loader` | memconservative（默认） | 已是省内存模式，不动 |
+
+### 系统精简
+
+关停这台机器永远用不到的组件。**收益不只是内存，更是减少攻击面和开机时间**：
+
+| 服务 | 内存 | 为什么用不到 |
+|---|---|---|
+| `fwupd` | 44.8 M | 固件更新守护 —— 虚拟机里没有可更新的固件 |
+| `multipathd` | 21.9 M | 多路径 SAN 存储 —— 本机只有一块 virtio-scsi 盘 |
+| `udisks2` | 13.5 M | 桌面环境的磁盘自动挂载守护 —— 无头机器 |
+| `ModemManager` | 8.2 M | 管理 3G/4G/LTE 调制解调器 |
+| `open-vm-tools` / `vgauth` | — | **VMware** 的 guest 工具 —— 本机跑在 KVM 上，对应的是已在跑的 `qemu-guest-agent` |
+| `open-iscsi` / `gpu-manager` / `thermald` / `smartmontools` / `apport` / `pollinate` / `snapd` | — | 分别是：iSCSI 客户端 / 显卡驱动切换 / Intel 温控（虚拟机没有真实温度传感器）/ 物理盘 SMART（虚拟盘没有）/ 崩溃上报 / 一次性取熵 / 未安装任何 snap |
+
+🔴 **`fwupd` 和 `udisks2` 是 D-Bus 激活的**：`disable` 只是不开机自启，被调用时还会起来 —— 必须 `mask`（把 unit 链到 `/dev/null`）才是真正禁止。
+
+**保留**：`sysstat`（性能历史数据，排查有用）、`unattended-upgrades`（安全补丁；网关虽只暴露在 LAN，补丁仍值得打）。
+
+### 日志保留
+
+**两套独立的日志系统**，很多人只改一套然后奇怪为什么没生效：
+
+| | 存什么 | 配置位置 | 策略 |
+|---|---|---|---|
+| **journald** | 二进制，`journalctl` 读的。**mihomo 的日志全在这** | `/etc/systemd/journald.conf.d/10-retention.conf` | 15 天 / 1 G |
+| **rsyslog + logrotate** | 文本副本 `/var/log/syslog` 等 | `/etc/logrotate.conf` + `/etc/logrotate.d/rsyslog` | `daily` × `rotate 15` |
+
+🔴 **写在 `journald.conf.d/` 而不是直接改 `journald.conf`**：主文件归 systemd 这个 apt 包管，直接改会让 dpkg 在升级时弹"保留 / 覆盖"的交互提示，或留下 `.dpkg-dist` 让你以为改生效了其实没有。drop-in 目录是官方留给用户的定制点。查合并后**真正生效**的值：
+
+```bash
+systemd-analyze cat-config systemd/journald.conf
+```
+
+**实测体量**（`log-level: info`）：
+
+```
+journald   约 28–30 MB/天  →  15 天约 450 MB
+syslog 系  约 5 MB/天，压缩后每个约 0.4 MB  →  15 天约 15 MB
+合计       ≈ 465 MB，SystemMaxUse=1G 留了一倍余量
+```
+
+🔴 **媒体机上线后要复测**：mihomo 在 `info` 级别下**每条新连接记一行**，qBittorrent 一跑起来每天多出十几万条连接是常态，日志量可能翻 3–5 倍 → 1 G 会先于 15 天触发，实际保留缩短到 5–8 天。到时候要么把 `SystemMaxUse` 提到 3 G，要么接受 BT 活跃期保留变短。
+
+**`log-level` 保持 `info` 不降级** —— 排查抖音卡顿那次，正是靠 `match GeoSite(cn) using DIRECT` 这些 info 级日志才排除了旁路由。降到 `warning` 能省 99% 的量，但下次出问题就抓瞎，而 450 MB 在 37 G 可用空间里不值一提。
+
+---
+
+## 排查方法论：卡顿到底是不是网关的锅
+
+以"抖音直播卡"为例。旁路由上线后，**任何网络问题都会被第一时间怀疑到网关头上** —— 需要一套能快速证伪的流程。
+
+### 第一步：先证伪，不要先优化
+
+🔴 **最有力的证据是换一条完全独立的路径**：
+
+```
+路径 A：手机 → 家里 Wi-Fi → 旁路由 mihomo → 光猫 → 抖音 CDN     卡
+路径 B：手机 → 蜂窝网络 → 运营商 → 抖音 CDN                      也卡
+                ↑ 完全不经过家里任何设备
+```
+
+两条独立路径都卡 → **共同点只剩内容源和播放设备** → 网关无罪。这一步只要几十秒，却能省掉几小时的无效优化。
+
+### 第二步：看规则判决，不要猜
+
+```bash
+sudo journalctl -u mihomo --since "2 hours ago" | grep -iE "douyin|bytedance|snssdk|zijieapi"
+```
+
+实测输出：
+
+```
+lf3-social.iesdouyin.com:443   match GeoSite(cn) using DIRECT   × 7
+aweme.snssdk.com:443           match GeoIP(cn)  using DIRECT    × 2
+gecko.zijieapi.com:443         match GeoSite(cn) using DIRECT
+```
+
+**全部 DIRECT，一条都没走代理。** 而且 `aweme.snssdk.com` 是被 `GEOIP(cn)` 兜住的、不是 `GEOSITE` —— 这在真实流量上再次验证了坑 8 那个"不能加 `no-resolve`"的决定。
+
+### 第三步：数错误，不数流量
+
+```
+观看的 2 小时内：warning 4 条（3 条网易云 ipv6 + 1 条腾讯 PCDN），
+                 抖音相关错误 0 条，UDP 解析失败 0 次
+```
+
+**零错误 = 网关这一段是干净的。**
+
+### 三个结论
+
+| | |
+|---|---|
+| **CPU 不是瓶颈** | RRD 一天峰值 **6.3%**，`softirq` 0%，`time_squeeze` 0，内核转发丢包 0。**加核心解决不了任何问题** |
+| **看目标是域名还是纯 IP** | 连接列表里全是纯 IP → DNS 绕过了 mihomo，域名规则全部失效。这是判断"分流有没有生效"最快的一眼 |
+| **直播 ≠ 点播** | 点播的内容早就在 CDN 上，直播是主播实时推上来的。主播那端网络一抖，全网观众一起卡 —— 这段在你这边怎么优化都没用 |
+
+### 顺带查出但与本次无关的两条
+
+- `apd-pcdnwxstat.teg.tencent-cloud.net:53861 → 13 个国内 IP 全部 i/o timeout` —— 腾讯的 **PCDN**（用别的用户设备做 P2P 分发加速）。旁路由的多层 NAT 破坏了 P2P 穿透，这是旁路由的固有副作用，同类问题还影响 BT、游戏联机、视频通话。🔴 但未必是坏事：PCDN 会占用你的**上行**给陌生人做分发。
+- `ipv6.music.163.com dns resolve failed` —— `ipv6: false` 的必然结果（该域名只有 AAAA 记录），网易云会自己退回 IPv4 域名，无害噪音。
+
+---
+
 ## 待办
 
 ```
@@ -776,12 +1107,17 @@ AI 规则总数从 **90 → 132 条 + 3 个 GEOSITE 类别（226 条）**。
 ✅ ⑦ DNS（fake-ip + fake-ip-filter + nameserver-policy）
 ✅ ⑧ 关闭光猫 IPv6（WAN），消除 IPv6 绕过
 ✅ ⑨ 路由器 DHCP 全局切换（网关与 DNS 都指向 .2，备用 DNS 留空，租期 7200）
+✅ ⑪ 自建服务器直连规则（见坑 18）
+✅ ⑫ 运行调优：内核参数 / 服务优先级 / mihomo 配置层 / 系统精简 / 日志保留
 
+□ 🔴 停机窗口：装 2.5 寸 SATA 盘；重启 mihomo 让 Nice / OOMScoreAdjust / GOMEMLIMIT 生效
 □ 观察数天，关注是否有设备异常
 □ 各设备关掉本地代理（Surge / Clash 客户端），避免双重代理 —— 见坑 17
 □ apt 源从清华换到阿里云/中科大（ipv6:false 的副作用，见坑 9）
 □ ⑩ 断电演练：BIOS「断电后恢复 = 电源开启」+ 拔插线板计时
-□ healthcheck.sh：把五层体检做成退出码信号
+□ healthcheck.sh：把五层体检做成退出码信号（内存判据用 PSI，不用被 page cache 误导的 used）
 □ 宿主机看门狗：VM 挂了自动拉起（L2 层自愈）
 □ Tailscale 入站（在外面回家）
+□ 媒体机上线后复测日志量，可能要把 SystemMaxUse 从 1 G 提到 3 G
+□ sniffer：治客户端自带 DNS / 纯 IP 连接的场景（优先级低 —— 抖音已排除，不是为它做）
 ```
