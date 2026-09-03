@@ -11,6 +11,16 @@ bind-address: '*'
 mode: rule
 log-level: info
 
+# 🔴 这台机器【只做转发】，处理的是别的设备发来的流量 ——
+#    进程归属查询在本机永远查不到对应进程（进程在别的机器上），
+#    却要为【每一条连接】付出一次查表开销。off 直接省掉这笔。
+#    代价：面板里看不到本机发起连接的进程名 —— 而网关上几乎没有本机连接。
+find-process-mode: off
+
+# 对解析出多个 IP 的域名【并发】发起握手，取最先成功的那条。
+# 直接降低连接建立延迟，尤其是那些解析出一堆 IP、其中部分不可达的境外域名。
+tcp-concurrent: true
+
 # 🔴 关掉 mihomo 自身的 IPv6，两个作用：
 #   1. 拉订阅时走 IPv4，命中机场的 IP 白名单
 #      （默认按 RFC 6724 优先 IPv6，会带着 240e:... 出去被 403 拒绝）
@@ -30,6 +40,12 @@ external-ui: /etc/mihomo/ui
 #    开这个才会持久化到 cache.db，重启后保持你在面板上选的节点。
 profile:
   store-selected: true
+  # 🔴 把 fake-ip 映射表持久化到 cache.db。
+  #    不开的话，mihomo 一重启或热重载，映射表就清空 ——
+  #    而客户端还缓存着旧的 198.18.x.x，发过来时 mihomo 反查不到域名，
+  #    日志里就是 "[UDP] Resolve Ip error: can't resolve ip"，连接【直接失败】。
+  #    实测这类错误 24 小时内出现过 90 次。
+  store-fake-ip: true
 
 # ── GeoIP / Geosite 数据库来源 ────────────────────────────
 # 🔴 必须显式指定。mihomo 默认用 raw.githubusercontent.com，
