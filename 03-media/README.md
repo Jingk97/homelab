@@ -4,7 +4,9 @@
 
 一台虚拟机上跑两个服务：**qBittorrent 负责下载和做种，Jellyfin 负责刮削和播放**。
 
-本文的重点不是"怎么装"，而是**三个不装就会踩坑的设计**：存储怎么分层、文件怎么共享、流量怎么分流。
+本文的重点不是"怎么装"，而是**四个不想清楚就会踩坑的设计**：存储怎么分层、文件怎么共享、流量怎么分流、权限怎么打通。
+
+追加一块外挂硬盘播放的完整流程见 [§7](#7-新增一块外挂硬盘并播放) —— **不需要重启虚拟机**。
 
 ---
 
@@ -324,7 +326,161 @@ sudo systemctl start qbittorrent-nox
 
 ---
 
-## 7. 关于硬件转码（当前未启用）
+## 7. 新增一块外挂硬盘并播放
+
+手头有块装满片子的移动硬盘，想让 Jellyfin 直接播 —— 这是最常见的追加需求。
+
+### 7.1 🔴 核心机制：挂在 `/srv/data` 下面，不用重启虚拟机
+
+直觉做法是「再建一个 Directory Mapping，给虚拟机加一个 `virtiofs1`」。**别这么做** —— `virtiofsd` 的 `--shared-dir` 在虚拟机启动那一刻就定死了，加映射必须**重启虚拟机**。为插块盘重启媒体机不合理。
+
+正确做法：**把新盘挂到已经共享出去的 `/srv/data` 目录树里面**。
+
+原理是 PVE 拉起 virtiofsd 时带了 `--announce-submounts` 参数：
+
+```
+/usr/libexec/virtiofsd --fd=12 --shared-dir=/srv/data --announce-submounts --syslog
+                                                       ↑ 这个
+```
+
+它会把共享目录下的**子挂载点**通告给客体，客体因此能把它识别成一个独立文件系统，而不是当成普通目录。
+
+**实测验证过**（用回环设备造了一块假盘）：
+
+```
+宿主机   mount /dev/loop0 /srv/data/external/testdisk
+客体     ls /srv/data/external/testdisk          → ✅ 立刻可见，没重启
+客体     findmnt /srv/data/external/testdisk     → ✅ 独立挂载点，fstype=virtiofs
+客体     df -h                                    → ✅ 单独一行，显示这块盘自己的容量
+客体     sudo -u jellyfin cat .../movie.txt       → ✅ 服务用户可读
+```
+
+### 7.2 完整步骤
+
+**① 插盘，在宿主机上认盘**
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL,TRAN
+#   TRAN=usb 的就是刚插上的
+#   FSTYPE 决定下一步用什么挂载参数
+```
+
+**② 建挂载点（🔴 必须在 `/srv/data` 下面）**
+
+```bash
+mkdir -p /srv/data/external/<盘名>
+```
+
+放在别处客体一律看不到 —— virtiofs 只共享 `/srv/data` 这一棵树。
+
+**③ 挂载 —— 按文件系统分两种情况**
+
+**ext4 / xfs 等 Linux 文件系统**（有 Unix 权限概念）：
+
+```bash
+mount /dev/sdX1 /srv/data/external/<盘名>
+chown -R 3000:3000 /srv/data/external/<盘名>      # 只读用可以不改
+```
+
+**NTFS / exFAT / FAT32**（🔴 **没有 Unix 权限概念，必须用挂载选项指定属主**）：
+
+```bash
+# NTFS —— 用内核的 ntfs3 驱动
+mount -t ntfs3 -o uid=3000,gid=3000,umask=0002 /dev/sdX1 /srv/data/external/<盘名>
+
+# exFAT
+mount -t exfat -o uid=3000,gid=3000,umask=0002 /dev/sdX1 /srv/data/external/<盘名>
+```
+
+这类文件系统里**每个文件的属主是挂载时统一指定的**，`chown` 对它们无效。不写 `uid=3000,gid=3000` 就会全部属于 root，客体里的 jellyfin 读不到。
+
+> **宿主机的格式支持（实测 PVE 9.2）**：`ext4` / `ntfs3` / `vfat` 内核已内建，`exfat` 有模块会在 mount 时自动加载。**都不需要额外装包** —— `ntfs-3g` 和 `exfatprogs` 没装也没关系，那是给 `fsck` / `mkfs` 用的，挂载读写用内核驱动就够。
+
+**④ 在客体里确认（不用重启）**
+
+```bash
+ssh jing@192.168.5.60
+ls /srv/data/external/<盘名>
+findmnt /srv/data/external/<盘名>      # 应显示为独立挂载点
+sudo -u jellyfin ls /srv/data/external/<盘名>   # 权限自检
+```
+
+**⑤ Jellyfin 添加媒体库**
+
+`控制台 → 媒体库 → 添加媒体库` → 选类型 → 路径填 **`/srv/data/external/<盘名>`**（客体里的路径，不是宿主机路径）→ 保存后点「扫描媒体库」。
+
+### 7.3 🔴 三个限制
+
+**① 硬链接跨不过去**
+
+```
+ln /srv/data/external/<盘名>/xxx.mkv /srv/data/media/library/movies/yyy.mkv
+→ Invalid cross-device link
+```
+
+外挂盘是**另一个文件系统**，硬链接只能在同一文件系统内建立（见 [§2](#2--设计二硬链接--做种和媒体库共用一份文件)）。
+
+**所以外挂盘的正确用法是「作为一个独立的媒体库路径直接加进 Jellyfin」**，而不是想办法把它链进 `library/`。真要合并进主媒体库，只能**复制**（占双倍空间）或**移动**。
+
+**② 拔盘前 `umount` 会报 `target is busy`**
+
+virtiofsd 会持有子挂载点里文件的打开句柄：
+
+```
+lsof +D /srv/data/external/testdisk
+COMMAND     PID USER  FD  TYPE  NAME
+virtiofsd 22140 root  39u REG   /srv/data/external/testdisk/movie.txt
+virtiofsd 22140 root  40u DIR   /srv/data/external/testdisk
+```
+
+**拔盘流程**：
+
+```bash
+# 1. 先在 Jellyfin 里移除对应媒体库（否则它会持续扫描）
+# 2. 宿主机卸载
+umount /srv/data/external/<盘名>
+#    还 busy 就用延迟卸载：
+umount -l /srv/data/external/<盘名>
+# 3. 确认后再拔线
+```
+
+`umount -l`（lazy）会立刻把挂载点从目录树摘掉，等最后一个句柄关闭时真正释放。**直接硬拔会导致客体侧 IO 错误**。
+
+**③ 写 fstab 必须带 `nofail`**
+
+想让它开机自动挂：
+
+```bash
+UUID=$(blkid -s UUID -o value /dev/sdX1)
+echo "UUID=$UUID  /srv/data/external/<盘名>  ntfs3  uid=3000,gid=3000,umask=0002,nofail,noatime  0  0" >> /etc/fstab
+systemctl daemon-reload && findmnt --verify --fstab
+```
+
+🔴 **漏了 `nofail`，哪天盘没插就会让整台宿主机卡在 emergency mode** —— 而这台宿主机上跑着旁路由，起不来等于全家断网。
+
+### 7.4 长期挂 vs 临时插
+
+| | 临时插一次 | 长期挂着 |
+|---|---|---|
+| fstab | 不写 | 写，**必带 `nofail`** |
+| 挂载点 | `/srv/data/external/<盘名>` | 同左 |
+| Jellyfin | 用完移除媒体库 | 保留 |
+| 建议 | 手动 `mount` / `umount` | 顺便记一下 UUID 和盘的用途 |
+
+### 7.5 排错
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 客体里看不到新盘 | 挂在了 `/srv/data` **外面** | virtiofs 只共享这一棵树，挂进去 |
+| 客体能看到目录但里面是空的 | 宿主机上挂载失败，只看到空挂载点 | 宿主机 `findmnt` 确认 |
+| jellyfin 报没权限 | NTFS/exFAT 挂载没带 `uid=3000,gid=3000` | 重新挂载，加上选项 |
+| `mount: unknown filesystem type 'ntfs'` | 驱动名写错了 | 用 `-t ntfs3`（不是 `ntfs`） |
+| Jellyfin 扫不出片子 | 命名不符合规范 | 电影 `片名 (年份).mkv`，剧集 `剧名/Season 01/剧名 S01E01.mkv` |
+| `umount` 报 busy | virtiofsd 持有句柄 | `umount -l`；先在 Jellyfin 移除媒体库 |
+
+---
+
+## 8. 关于硬件转码（当前未启用）
 
 宿主机上插着一块 **GTX 1050 Ti（Pascal / GP107）**，带第 6 代 NVENC，支持 H.264 和 HEVC 编解码。但**现在没有给这台虚拟机用**，原因是：
 
@@ -344,7 +500,7 @@ LXC 之所以能两全，是因为**容器和宿主机共享同一个内核**，
 
 ---
 
-## 8. 排错
+## 9. 排错
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
@@ -358,7 +514,7 @@ LXC 之所以能两全，是因为**容器和宿主机共享同一个内核**，
 
 ---
 
-## 9. 速查
+## 10. 速查
 
 ```bash
 # ── 地址 ──
@@ -381,6 +537,24 @@ sudo -u jellyfin   ls   /srv/data/media/library/       && echo OK
 curl -s -o /dev/null -w '直连 %{http_code}\n' --max-time 8 https://api.themoviedb.org/3/
 curl -s -o /dev/null -w '代理 %{http_code}\n' --max-time 15 -x http://192.168.5.2:7890 https://api.themoviedb.org/3/
 # 期望：直连 000（连不上）  代理 401（服务器答复了）
+```
+
+**挂一块外挂硬盘（宿主机上操作，不用重启虚拟机）**
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL,TRAN        # TRAN=usb 的就是它
+mkdir -p /srv/data/external/<盘名>                 # 🔴 必须在 /srv/data 下面
+
+# Linux 文件系统
+mount /dev/sdX1 /srv/data/external/<盘名> && chown -R 3000:3000 /srv/data/external/<盘名>
+# NTFS / exFAT（🔴 属主只能挂载时指定，chown 无效）
+mount -t ntfs3 -o uid=3000,gid=3000,umask=0002 /dev/sdX1 /srv/data/external/<盘名>
+
+# 客体侧验证（免重启）
+ssh jing@192.168.5.60 'findmnt /srv/data/external/<盘名>; sudo -u jellyfin ls /srv/data/external/<盘名>'
+
+# 拔盘：先在 Jellyfin 移除媒体库，再卸载
+umount /srv/data/external/<盘名> || umount -l /srv/data/external/<盘名>
 ```
 
 ---
