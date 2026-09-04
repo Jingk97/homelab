@@ -408,6 +408,69 @@ rules:
   - DOMAIN-SUFFIX,runwayml.com,AI服务
   - DOMAIN-SUFFIX,leonardo.ai,AI服务
 
+  # ── 2026-09-04 审计补充：以下域名此前【全部泄漏到订阅节点】────────
+  # 🔴 它们没被任何 AI 规则命中，直接落到最后的 MATCH,PROXY，
+  #    与「AI 只走自建线路」的设计意图相反，而且【不会有任何提示】。
+  #    AI服务 组候选是 [自建线路, REJECT]，结构上杜绝走订阅 ——
+  #    但这个保护只对【被规则命中的域名】生效，没命中的直接绕过整个机制。
+  #
+  #    实测方法：从 vm-dev(192.168.5.21) 逐个 curl，再读 mihomo 日志的
+  #    「match ... using ...」判断实际落到哪条规则。要复测就重跑这个流程。
+
+  # ① Agent 工具链 —— AI agent 运行时高频调用，最要紧
+  - DOMAIN-SUFFIX,tavily.com,AI服务
+  - DOMAIN-SUFFIX,serper.dev,AI服务
+  - DOMAIN-SUFFIX,exa.ai,AI服务
+  - DOMAIN-SUFFIX,firecrawl.dev,AI服务
+  - DOMAIN-SUFFIX,browserbase.com,AI服务
+  - DOMAIN-SUFFIX,e2b.dev,AI服务
+  - DOMAIN-SUFFIX,daytona.io,AI服务
+  - DOMAIN-SUFFIX,smithery.ai,AI服务
+
+  # ② 模型 API / 推理平台
+  - DOMAIN-SUFFIX,fal.ai,AI服务
+  - DOMAIN-SUFFIX,sambanova.ai,AI服务
+  - DOMAIN-SUFFIX,hyperbolic.xyz,AI服务
+  - DOMAIN-SUFFIX,baseten.co,AI服务
+  - DOMAIN-SUFFIX,lambda.ai,AI服务
+  - DOMAIN-SUFFIX,lambdalabs.com,AI服务
+  - DOMAIN-SUFFIX,aimlapi.com,AI服务
+  - DOMAIN-SUFFIX,glama.ai,AI服务
+  - DOMAIN-SUFFIX,requesty.ai,AI服务
+  - DOMAIN-SUFFIX,openpipe.ai,AI服务
+
+  # ③ AI 网关与可观测性
+  - DOMAIN-SUFFIX,portkey.ai,AI服务
+  - DOMAIN-SUFFIX,helicone.ai,AI服务
+  - DOMAIN-SUFFIX,braintrust.dev,AI服务
+
+  # ④ 编码助手
+  - DOMAIN-SUFFIX,zed.dev,AI服务
+  - DOMAIN-SUFFIX,continue.dev,AI服务
+  - DOMAIN-SUFFIX,aider.chat,AI服务
+  - DOMAIN-SUFFIX,sourcegraph.com,AI服务
+  - DOMAIN-SUFFIX,tabnine.com,AI服务
+  - DOMAIN-SUFFIX,supermaven.com,AI服务
+  - DOMAIN-SUFFIX,augmentcode.com,AI服务
+  - DOMAIN-SUFFIX,cognition.ai,AI服务
+  - DOMAIN-SUFFIX,devin.ai,AI服务
+  - DOMAIN-SUFFIX,genspark.ai,AI服务
+
+  # ⑤ 语音 / 多模态
+  - DOMAIN-SUFFIX,assemblyai.com,AI服务
+  - DOMAIN-SUFFIX,deepgram.com,AI服务
+  - DOMAIN-SUFFIX,cartesia.ai,AI服务
+  - DOMAIN-SUFFIX,play.ht,AI服务
+
+  # ⑥ 向量库 / Agent 记忆
+  - DOMAIN-SUFFIX,qdrant.tech,AI服务
+  - DOMAIN-SUFFIX,trychroma.com,AI服务
+  - DOMAIN-SUFFIX,milvus.io,AI服务
+  - DOMAIN-SUFFIX,turbopuffer.com,AI服务
+  - DOMAIN-SUFFIX,upstash.com,AI服务
+  - DOMAIN-SUFFIX,mem0.ai,AI服务
+  - DOMAIN-SUFFIX,zep.com,AI服务
+
   # ── 国内直连 ──────────────────────────────────────────
   # 🔴 GEOSITE 必须在 GEOIP 前面：HTTP 代理请求携带的是域名，此时还没有 IP。
   #    GEOSITE 按域名判断，不需解析，快且准。
@@ -416,6 +479,16 @@ rules:
   # IP 维度兜底。🔴 不能加 no-resolve —— 加了会导致带域名的连接跳过这条，
   # 国内流量全部落到 MATCH 走代理（实测 www.qq.com 走了日本节点）。
   - GEOIP,CN,DIRECT
+
+  # ── AI 兜底（🔴 位置不能上移）────────────────────────────
+  # .ai 是安圭拉的国别顶级域，被 AI 公司大量使用。这条用来接住
+  # 【将来新出现、还没写进上面列表】的 AI 服务，避免又静默泄漏到订阅。
+  #
+  # 🔴 必须放在 GEOSITE,cn / GEOIP,CN 之【后】，顺序不能换 ——
+  #    国内厂商也在用 .ai 域名（如智谱的 z.ai）。放前面会把它们
+  #    绕到境外 VPS 再回国，慢且没必要。放后面则先被 CN 规则判成直连，
+  #    只有剩下的境外 .ai 才归 AI服务。
+  - DOMAIN-SUFFIX,ai,AI服务
 
   # ── 兜底 ──────────────────────────────────────────────
   # MATCH 匹配一切，必须最后一条，否则后面的规则都是死代码。
