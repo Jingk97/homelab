@@ -59,22 +59,25 @@ flowchart TD
 国内镜像（快得多）：
 
 ```
-https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/
+https://mirrors.aliyun.com/ubuntu-releases/24.04/
 https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/
 ```
+
+> 🔴 **不要用清华 TUNA。** 2026-09-04 实测它封禁了本地出口 IP，ISO 下载同样
+> 403，且返回的是它自己的 HTML 提示页而不是可读的错误。
 
 等价的 Shell 操作：
 
 ```bash
 cd /var/lib/vz/template/iso/
-wget https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/ubuntu-24.04.x-live-server-amd64.iso
+wget https://mirrors.aliyun.com/ubuntu-releases/24.04/ubuntu-24.04.x-live-server-amd64.iso
 ```
 
 校验：
 
 ```bash
 sha256sum ubuntu-24.04.x-live-server-amd64.iso
-curl -s https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/24.04/SHA256SUMS | grep live-server
+curl -s https://mirrors.aliyun.com/ubuntu-releases/24.04/SHA256SUMS | grep live-server
 ```
 
 ---
@@ -514,12 +517,21 @@ chmod +x provision-base.sh
 把代理全局 export 之后再跑脚本，`apt update` 会直接失败：
 
 ```
-Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InRelease
+Failed to fetch https://mirrors.aliyun.com/ubuntu/dists/noble/InRelease
 403  Forbidden [IP: 192.168.5.100 6152]
                     ↑ 这是代理的地址
 ```
 
-**原因**：apt 把清华镜像的请求也发给了代理，代理转发到境外节点 → **出口 IP 变成境外** → 镜像站返回 403。
+**原因**：apt 把国内镜像的请求也发给了代理，代理转发到境外节点 → **出口 IP 变成境外** → 镜像站返回 403。
+
+> 🔴 **但反过来不成立：403 不等于走了代理。**
+> 2026-09-04 实测，清华 TUNA 在**完全直连**的状态下也返回 403 —— 它封禁了
+> 本地出口 IP，与代理无关。当时旁路由日志明确显示该域名命中
+> `GeoSite(cn) using DIRECT`，流量根本没经过代理。
+>
+> **诊断顺序**：① 先看方括号里的 IP —— 是内网代理地址（如上例）才说明走了
+> 代理；② 查旁路由日志确认实际命中哪条规则；③ 横向对比其他镜像站。
+> 一上来就归因于代理会查错方向。
 
 🔴 **国内镜像走代理不但没必要，而且一定失败。**
 
@@ -600,7 +612,7 @@ skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.
 
 ```bash
 # 直连能通国内镜像
-curl -I --connect-timeout 10 https://mirrors.tuna.tsinghua.edu.cn/ && echo "镜像直连 OK"
+curl -I --connect-timeout 10 https://mirrors.aliyun.com/ && echo "镜像直连 OK"
 
 # 经代理能通 GitHub
 https_proxy=http://192.168.5.9:6152 curl -I --connect-timeout 10 https://github.com && echo "代理 OK"

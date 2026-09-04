@@ -562,37 +562,88 @@ Proxmox 装完**默认启用企业源**，没有订阅凭证会导致 `apt updat
 
 > 页面顶部的黄色提示「no-subscription 软件源不建议用于生产环境」是**正常的**，不用管。它只是提醒这个源的测试没有企业源严格 —— 对个人实验室完全没问题。
 
-**可选：换成国内镜像加速**
+#### 🔴 必须验证第 ③ 步真的生效了
+
+**这是一个会静默失败的坑，2026-09-04 实测踩到过。**
+
+PVE 9 的安装器会预先生成 `proxmox.sources`，但里面写的是 **`Enabled: false`**。如果只做了 ①② 禁用企业源、③ 没真正生效，结果是：
+
+```
+企业源被禁用   →  apt update 不再报 401  →  【看起来修好了】
+no-subscription 仍是 false  →  实际上一个 PVE 源都没启用
+                            →  内核 / qemu / pve-manager 永远收不到更新
+```
+
+**症状极其隐蔽**：`apt update` 干干净净没有任何报错，`apt upgrade` 也能正常跑（升的全是 Debian 基础包）。实测那台机器就这样落后了 9 个版本才被发现。
+
+**机器可判定的验证信号**：
+
+```bash
+apt-cache policy pve-manager
+```
+
+```
+✅ 正确 —— Candidate 来自仓库
+   Candidate: 9.2.11
+     9.2.11 500
+        500 https://mirrors.ustc.edu.cn/proxmox/debian/pve trixie/pve-no-subscription
+
+❌ 错误 —— Candidate 只来自本地 dpkg 状态库，说明没有任何仓库提供它
+   Candidate: 9.2.2
+     *** 9.2.2 100
+        100 /var/lib/dpkg/status        ← 只有这一行就是没救回来
+```
+
+顺带确认 apt 实际加载了哪些仓库：
+
+```bash
+apt-get indextargets --no-release-info | grep '^URI:' | sed 's|/dists/.*||' | sort -u
+```
+
+**换成国内镜像加速**
 
 Proxmox VE 9 基于 **Debian 13 "trixie"**，用的是新的 **deb822 格式（`.sources` 文件）**。网上很多教程还是 PVE 8 的 `bookworm` + `.list` 写法，照抄会报错。
+
+> 🔴 **Proxmox 源和 Debian 源用的是不同镜像站，这不是笔误。**
+> 阿里云**没有镜像 Proxmox 仓库**（实测 `mirrors.aliyun.com/proxmox/...` 返回 404），
+> 只能用中科大；而 Debian 基础源两家都有，用阿里云。
+>
+> 🔴 **不要用清华 TUNA。** 2026-09-04 实测它封禁了本地出口 IP，
+> `apt` / `pypi` / ISO 下载一律 403，连镜像站根目录都进不去，
+> 且返回的是它自己的 HTML 提示页而不是可读的错误。
 
 ```bash
 cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'
 Types: deb
-URIs: https://mirrors.tuna.tsinghua.edu.cn/proxmox/debian/pve
+URIs: https://mirrors.ustc.edu.cn/proxmox/debian/pve
 Suites: trixie
 Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+Enabled: true
 EOF
 
 cat > /etc/apt/sources.list.d/debian.sources <<'EOF'
 Types: deb
-URIs: https://mirrors.tuna.tsinghua.edu.cn/debian
+URIs: https://mirrors.aliyun.com/debian/
 Suites: trixie trixie-updates
 Components: main contrib non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Enabled: true
 
 Types: deb
-URIs: https://mirrors.tuna.tsinghua.edu.cn/debian-security
+URIs: https://mirrors.aliyun.com/debian-security/
 Suites: trixie-security
 Components: main contrib non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+Enabled: true
 EOF
 
-apt update && apt full-upgrade -y
+apt update && apt-cache policy pve-manager     # 🔴 换完立刻验证，别等到要升级时才发现
 ```
 
-> 镜像站的目录结构偶尔会调整，报 404 时以镜像站的帮助页为准（如 https://mirrors.tuna.tsinghua.edu.cn/help/proxmox/ ）。
+> **`Enabled: true` 要显式写。** 省略时默认虽然是启用，但安装器生成的文件里可能已经写着 `Enabled: false` —— 用 `cat >` 覆盖能一并解决，用编辑器改则要确认这一行。
+
+> 镜像站的目录结构偶尔会调整，报 404 时以镜像站的帮助页为准（如 https://mirrors.ustc.edu.cn/help/proxmox.html ）。
 
 ### 7.5 验收清单
 
