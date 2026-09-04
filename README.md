@@ -30,8 +30,9 @@
 | CPU | Intel i7-12700F | 12C/20T（8P+4E），**F 后缀无核显** |
 | 主板 | 华硕 TUF GAMING B660M-PLUS D4 | BIOS 1402 (2022-04)，4 DIMM |
 | 内存 | DDR4-3200 32 GB | 实测满频 |
-| 系统盘 | 铠侠 RC20 1TB NVMe | **无 DRAM 缓存**（影响文件系统选型） |
-| 显卡 | 耕升 GTX 1050 Ti 4GB | Maxwell，带 UEFI GOP |
+| 系统盘 | 铠侠 KIOXIA-EXCERIA G2 1TB NVMe | **无 DRAM 缓存**（影响文件系统选型） |
+| 数据盘 | 希捷 ST2000LM015 2TB 2.5" 5400rpm | 🔴 **SMR 叠瓦盘**，怕持续随机写 —— 见 [05 · 数据盘](01-infrastructure/05-storage.md) |
+| 显卡 | 耕升 GTX 1050 Ti 4GB | **Pascal（GP107）**，带 UEFI GOP；NVENC 第 6 代，支持 H.264 + HEVC 编码 |
 | 网卡 | 板载 Realtek 2.5G | Proxmox 无 Wi-Fi 支持，必须有线 |
 
 > 机器自身的 hostname 是 `pve`。早期文档用过 `pve-old`，已统一为 `pve` —— PVE 节点名嵌在 `/etc/pve/nodes/<name>/` 目录结构里，改名要连 VM 配置一起搬，风险大于收益。
