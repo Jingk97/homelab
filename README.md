@@ -12,6 +12,7 @@
 |---|---|---|
 | **[`01-infrastructure/`](01-infrastructure/)** | 装 Proxmox → 网络规划 → 核心概念 → 虚拟机模板 → [数据盘接入](01-infrastructure/05-storage.md) | **地基**，只做一次 |
 | **[`02-gateway/`](02-gateway/)** | 旁路由：出站分流 + 入站回家（mihomo）<br/>含[原理说明](02-gateway/principles.md)：策略组 / 规则 / TUN / fake-ip | **服务 ①** |
+| **[`03-media/`](03-media/)** | 媒体库：qBittorrent 下载 + Jellyfin 播放<br/>四个设计：存储分层 / 硬链接做种 / 流量分流 / 跨服务权限 | **服务 ②** |
 | **[`tools/`](tools/)** | 批量推送与执行（`fleet.sh`） | 横向工具，不编号 |
 
 **编号语义**：`01` 是地基，后续所有服务都建在它产出的模板之上；`02+` 是服务，各自独立、可增删。
