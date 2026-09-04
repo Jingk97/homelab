@@ -19,8 +19,10 @@
 #
 # 关于代理：
 #   代理【只作用于境外目标】（GitHub / astral.sh / go.dev），
-#   国内镜像（清华 / golang.google.cn / npmmirror）一律直连。
+#   国内镜像（阿里云 / golang.google.cn / npmmirror）一律直连。
 #   把国内源也塞进代理会导致镜像站返回 403 —— 因为出口 IP 变成了境外。
+#   🔴 但反过来不成立：镜像站 403 不等于走了代理。清华 TUNA 就在
+#      直连状态下封禁了本机出口 IP（2026-09-04 实测），所以本脚本改用阿里云。
 #
 set -euo pipefail
 
@@ -44,7 +46,11 @@ trap _on_err ERR
 # ──────────────────────────────────────────────────────────────
 # 全局变量
 # ──────────────────────────────────────────────────────────────
-readonly MIRROR_HOST="mirrors.tuna.tsinghua.edu.cn"
+# 🔴 2026-09-04 从清华改为阿里云：清华 TUNA 封禁了本地出口 IP，
+#    apt / pypi 全部返回 403（连镜像站根目录都进不去），且不报可读的错。
+#    实测阿里云的三个路径与清华完全一致（ubuntu/ 、pypi/web/simple 、
+#    nodejs-release/），所以只换主机名即可，不用改下面任何路径。
+readonly MIRROR_HOST="mirrors.aliyun.com"
 readonly TARGET_USER="${SUDO_USER:-$(id -un)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 readonly TARGET_HOME
@@ -415,7 +421,7 @@ m5_python() {
 "[global]
 index-url = https://${MIRROR_HOST}/pypi/web/simple
 trusted-host = ${MIRROR_HOST}"; then
-    info "pip 已切换到清华源"
+    info "pip 已切换到 ${MIRROR_HOST}"
   else
     skip "pip 源无变化"
   fi

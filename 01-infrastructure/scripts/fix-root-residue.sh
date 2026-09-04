@@ -294,10 +294,13 @@ m3_check_system() {
   [[ "$v" == "multi-user.target" ]] && ok "默认 target" "$v" || bad "默认 target" "${v}（应为 multi-user.target）"
 
   # apt 源：PVE 9 / Ubuntu 24.04 用 deb822 格式的 .sources，不是老的 .list
-  if grep -qs 'mirrors\.tuna\.tsinghua\.edu\.cn' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; then
-    ok "apt 镜像源" "清华 (deb822)"
-  elif grep -rqs 'tuna\|ustc\|aliyun' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-    ok "apt 镜像源" "国内镜像"
+  # 🔴 2026-09-04 起清华源【不再是通过条件】：TUNA 封禁了本地出口 IP，
+  #    apt / pypi 一律 403，连镜像站根目录都进不去。检测到清华要报警，
+  #    否则体检会给出"一切正常"的假信号，而实际上这台机器装不了任何包。
+  if grep -rqs 'mirrors\.tuna\.tsinghua\.edu\.cn' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    bad "apt 镜像源" "清华（本地 IP 被封，会 403）—— 换成 mirrors.aliyun.com"
+  elif grep -rqs 'aliyun\|ustc' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    ok "apt 镜像源" "国内镜像 (deb822)"
   else
     soso "apt 镜像源" "未使用国内镜像（SKIP_MIRROR=1 跑过？）"
   fi

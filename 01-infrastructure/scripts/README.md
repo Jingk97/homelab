@@ -73,11 +73,22 @@ SKIP_LANG=1   ./provision-base.sh                   # 跳过语言运行时
 国内镜像走代理会因为**出口 IP 变成境外**被拒：
 
 ```
-Failed to fetch https://mirrors.tuna.tsinghua.edu.cn/ubuntu/dists/noble/InRelease
+Failed to fetch https://mirrors.aliyun.com/ubuntu/dists/noble/InRelease
 403  Forbidden [IP: 192.168.5.100 6152]
 ```
 
 脚本会**主动 unset 继承来的代理变量**，否则 apt 会继承它们照样踩 403。代理只在本次执行生效，不写入任何持久化配置。
+
+> 🔴 **但反过来不成立：镜像站返回 403 不等于"走了代理"。**
+> 2026-09-04 实测：清华 TUNA 对本地出口 IP 直接封禁，**直连状态下**
+> 连镜像站根目录都是 403（返回它自己的"您目前无法访问此页面"页面），
+> 而同一时刻旁路由日志明确显示该域名命中 `GeoSite(cn) using DIRECT`，
+> 流量根本没经过代理。
+>
+> **正确的诊断顺序**：① 查旁路由日志确认实际命中哪条规则
+> （`journalctl -u mihomo | grep <域名>`）→ ② 横向对比其他镜像站
+> （当时阿里云 / 中科大 / cn.archive 全部 200）。
+> 不要一看到 403 就归因于代理，会查错方向。
 
 ### 🔴 刻意不做的三件事
 
