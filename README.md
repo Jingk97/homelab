@@ -10,7 +10,7 @@
 
 | 目录 | 内容 | 性质 |
 |---|---|---|
-| **[`01-infrastructure/`](01-infrastructure/)** | 装 Proxmox → 网络规划 → 核心概念 → 虚拟机模板 | **地基**，只做一次 |
+| **[`01-infrastructure/`](01-infrastructure/)** | 装 Proxmox → 网络规划 → 核心概念 → 虚拟机模板 → [数据盘接入](01-infrastructure/05-storage.md) | **地基**，只做一次 |
 | **[`02-gateway/`](02-gateway/)** | 旁路由：出站分流 + 入站回家（mihomo）<br/>含[原理说明](02-gateway/principles.md)：策略组 / 规则 / TUN / fake-ip | **服务 ①** |
 | **[`tools/`](tools/)** | 批量推送与执行（`fleet.sh`） | 横向工具，不编号 |
 
