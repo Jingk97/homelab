@@ -349,6 +349,45 @@ SystemMaxFiles=100"; then
   else
     skip "sudo 免密已配置"
   fi
+
+  # ── readline：Tab 补全与历史搜索的体验增强 ────────────────
+  # bash-completion 本身在 M4 装（921 个补全脚本，懒加载），基础补全开箱可用。
+  # 这里配的是 readline 层的【交互行为】，默认值对日常使用不友好。
+  #
+  # 🔴 第一行的 $include 不能省：~/.inputrc 存在时会【完全取代】/etc/inputrc，
+  #    不显式包含回来就会丢掉系统默认键位（Home/End/Delete 等会失灵）。
+  if write_if_changed "${TARGET_HOME}/.inputrc" \
+'# 由 provision-base.sh 生成。改这里不如改脚本，否则下次执行会被覆盖。
+
+# 🔴 必须放在最前面：否则系统默认键位（Home / End / Delete）会失效
+$include /etc/inputrc
+
+# 补全忽略大小写 —— 敲 doc<TAB> 能补出 Documents
+set completion-ignore-case on
+# 连字符与下划线互相匹配 —— 敲 my_f<TAB> 也能补出 my-file
+set completion-map-case on
+
+# 多个候选时【第一次】Tab 就列出来，默认要连按两次
+set show-all-if-ambiguous on
+# 候选按类型着色（目录 / 可执行 / 符号链接），一眼分清
+set colored-stats on
+set colored-completion-prefix on
+# 候选超过 200 个才询问"要全部列出吗"，默认 100 太容易被打断
+set completion-query-items 200
+
+# 🔴 这两行提升最大：把上下键从"按时间倒带"变成"按已输入前缀搜索"。
+#    敲 git 再按 ↑，只在 git 开头的历史里翻。日常省下的时间比补全本身还多。
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+# 上面用的是通用转义序列；部分终端发送的是 \eOA/\eOB，一并绑定
+"\eOA": history-search-backward
+"\eOB": history-search-forward'; then
+    # write_if_changed 用 sudo tee 写，属主是 root，家目录文件要改回去
+    sudo chown "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.inputrc"
+    info "readline 配置已写入（补全忽略大小写 / 前缀搜历史）"
+  else
+    skip "readline 配置无变化"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -365,6 +404,53 @@ m3_ops_tools() {
     ca-certificates gnupg apt-transport-https \
     software-properties-common
   info "htop btop ncdu tree lsof / net-tools dnsutils mtr tcpdump nmap / rsync sysstat smartmontools tmux vim"
+
+  # ── tmux 配置 ────────────────────────────────────────────────
+  # 🔴 为什么必须配：SSH 断线会给前台进程组发 SIGHUP，长任务直接终止。
+  #    跑 AI agent 时尤其致命 —— 任务跑到一半断线，上下文全丢。
+  #    tmux 上面已经装了，但默认配置对这个用途不够，下面两项是关键。
+  if write_if_changed "${TARGET_HOME}/.tmux.conf" \
+"# 由 provision-base.sh 生成。改这里不如改脚本，否则下次执行会被覆盖。
+
+# 1. 🔴 消除 ESC 延迟。默认 500ms 是为了区分 ESC 键与终端转义序列，
+#    但全屏 TUI 应用（Claude Code 这类）按 ESC 会明显卡顿。
+set -sg escape-time 0
+
+# 2. 🔴 加大回滚缓冲。默认 2000 行，AI agent 的输出量轻易冲掉；
+#    断线重连后想翻之前的输出会发现已经没了。50000 行约几十 MB 内存。
+set -g history-limit 50000
+
+# 3. 鼠标滚轮翻历史、点击切换面板
+set -g mouse on
+
+# 4. 窗口/面板从 1 开始编号 —— 键盘上 1 在最左边，0 在最右边，
+#    从 0 开始会让\"第一个窗口\"离手最远。
+set -g base-index 1
+setw -g pane-base-index 1
+
+# 5. 复制模式用 vi 键位
+setw -g mode-keys vi
+
+# 6. 状态栏显示会话名 —— 多会话时避免接错。
+set -g status-left '#[fg=colour46,bold] #S #[default] '
+set -g status-left-length 30
+set -g status-right '#[fg=colour244]#H #[fg=colour250]%H:%M '
+set -g status-style 'bg=colour235 fg=colour250'
+
+# 7. 真彩色 —— 否则 TUI 应用的界面会发灰
+set -g default-terminal \"tmux-256color\"
+set -ga terminal-overrides \",*256col*:Tc\"
+
+# 8. 窗口标题跟随当前程序，一眼看出哪个窗口在跑什么
+setw -g automatic-rename on
+set -g set-titles on"; then
+    # write_if_changed 用 sudo tee 写，属主是 root。家目录文件要改回去，
+    # 否则用户自己没法编辑。
+    sudo chown "${TARGET_USER}:${TARGET_USER}" "${TARGET_HOME}/.tmux.conf"
+    info "tmux 配置已写入（escape-time 0 / history-limit 50000）"
+  else
+    skip "tmux 配置无变化"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────
