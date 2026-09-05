@@ -156,8 +156,20 @@ Host pve pve-x99
 Host vm-*
     User jing
 
+# 内网机器共有的设置
 Host vm-* pve pve-x99
     IdentityFile ${KEY_PATH}
+    # 🔴 只用上面指定的这把密钥。不加这条，ssh 会把 agent 里【所有】密钥
+    #    挨个试，密钥一多就撞上服务端的 MaxAuthTries（默认 6），报
+    #    「Too many authentication failures」—— 明明有正确密钥却登不上，
+    #    现象非常迷惑。
+    IdentitiesOnly yes
+    # 内网机器会频繁重建（每次从模板克隆都是全新主机密钥）。
+    # accept-new：首次自动信任，【但密钥变了仍然会告警】——
+    # 比 StrictHostKeyChecking no 安全，后者连中间人都不告警。
+    StrictHostKeyChecking accept-new
+    # 单独一个 known_hosts：重建机器后想清理直接删这个文件，
+    # 不会波及 github.com 等外部主机的记录。
     UserKnownHostsFile ~/.ssh/known_hosts_homelab
 ${END_MARK}"
 
