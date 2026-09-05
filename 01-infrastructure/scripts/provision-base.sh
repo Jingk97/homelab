@@ -227,9 +227,9 @@ m1_apt() {
   if [[ "$SKIP_MIRROR" == "1" ]]; then
     skip "SKIP_MIRROR=1，保持官方 apt 源"
   elif grep -q "$MIRROR_HOST" "$src" 2>/dev/null; then
-    skip "apt 源已是清华镜像"
+    skip "apt 源已是 ${MIRROR_HOST}"
   else
-    info "切换 apt 源到清华镜像（deb822 格式，Ubuntu 24.04+ 标准）"
+    info "切换 apt 源到 ${MIRROR_HOST}（deb822 格式，Ubuntu 24.04+ 标准）"
     [[ -f "$src" ]] && sudo cp "$src" "${src}.bak-${TS}" && info "原文件备份为 ${src}.bak-${TS}"
     sudo tee "$src" > /dev/null <<EOF
 Types: deb
