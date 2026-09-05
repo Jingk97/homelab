@@ -1,0 +1,58 @@
+═══ 关机前基线  2026-09-03 15:36:51 ═══
+
+── pve 宿主机 ──
+  uptime: up 2 days, 20 hours, 25 minutes
+  --- VM 列表 ---
+          VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID       
+           102 vm-router            running    1024              50.00 463156    
+          9000 tmpl-ubuntu-2404     stopped    4096              50.00 0         
+  --- 102 自启配置 ---
+    cores: 1
+    memory: 1024
+    onboot: 1
+    startup: order=1,up=30
+  --- 磁盘 ---
+    NAME      SIZE MODEL                 TRAN
+    nvme0n1 931.5G KIOXIA-EXCERIA G2 SSD nvme
+  --- ATA 端口 ---
+    数量: 8
+  --- 存储用量 ---
+    Name             Type     Status     Total (KiB)      Used (KiB) Available (KiB)        %
+    local             dir     active        98497780         7614944        85833288    7.73%
+    local-lvm     lvmthin     active       832888832         8162310       824726521    0.98%
+
+── vm-router ──
+  uptime: up 21 hours, 44 minutes   mihomo PID: 11289
+  --- 应在重启后生效的三项（现在还是旧值）---
+    oom_score_adj  0   → 重启后应为 -800
+    Nice           0   → 重启后应为 -5
+bash: line 7: /proc/11289/environ: Permission denied
+    GOMEMLIMIT     (未设置) → 重启后应为 600MiB
+  --- 应在重启后【保持】的调优（写在 /etc/ 里，须验证持久化）---
+    net.core.rmem_max                                8388608
+    net.core.netdev_max_backlog                      4096
+    net.netfilter.nf_conntrack_max                   65536
+    net.netfilter.nf_conntrack_tcp_timeout_established 3600
+    net.ipv4.tcp_keepalive_time                      600
+    net.ipv4.tcp_max_syn_backlog                     4096
+    vm.swappiness                                    10
+    net.ipv4.ip_forward                              1
+    conntrack hashsize                               16384
+  --- 配置指纹 ---
+    config.yaml sha256  c32d62619b9e15544428761ef6dc0f63
+    规则总数            137
+  --- journald 保留策略 ---
+    MaxRetentionSec=15day
+    SystemMaxUse=1G
+    MaxFileSec=1day
+    SystemMaxFiles=100
+  --- 已 mask 的服务 ---
+    cryptdisks-early.service
+    cryptdisks.service
+    fwupd.service
+    hwclock.service
+    multipath-tools-boot.service
+    screen-cleanup.service
+    sudo.service
+    udisks2.service
+    x11-common.service
