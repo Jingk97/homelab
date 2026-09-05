@@ -13,6 +13,7 @@
 | **[`01-infrastructure/`](01-infrastructure/)** | 装 Proxmox → 网络规划 → 核心概念 → 虚拟机模板 → [数据盘接入](01-infrastructure/05-storage.md) | **地基**，只做一次 |
 | **[`02-gateway/`](02-gateway/)** | 旁路由：出站分流 + 入站回家（mihomo）<br/>含[原理说明](02-gateway/principles.md)：策略组 / 规则 / TUN / fake-ip | **服务 ①** |
 | **[`03-media/`](03-media/)** | 媒体库：qBittorrent 下载 + Jellyfin 播放<br/>四个设计：存储分层 / 硬链接做种 / 流量分流 / 跨服务权限 | **服务 ②** |
+| **[`04-dev/`](04-dev/)** | 开发机 `vm-dev`：**AI 流量必须走自建线路**的完整保障<br/>三道闸（DNS 锁定 / 规则覆盖 / 结构隔离）+ 四层验证 | **服务 ③** |
 | **[`tools/`](tools/)** | 批量推送与执行（`fleet.sh`） | 横向工具，不编号 |
 
 **编号语义**：`01` 是地基，后续所有服务都建在它产出的模板之上；`02+` 是服务，各自独立、可增删。
@@ -91,8 +92,10 @@ DHCP 池  192.168.5.100-199
 **服务**
 
 - [x] **旁路由** —— ✅ 已全局上线：TUN + fake-ip DNS + AI 独立线路，路由器 DHCP 下发 `.2` 为网关与 DNS
-- [ ] 媒体机（Jellyfin + qBittorrent + 网盘）
-- [ ] 新节点 X99 组装与安装
+- [x] **媒体机** —— Jellyfin + qBittorrent，virtio-fs 共享 2T 数据盘，见 [03-media](03-media/)
+- [x] **新节点 X99** —— 组装 + PVE 9.2 安装完成（按需开机）
+- [x] **开发机** —— `vm-dev`，AI 流量全程走自建线路且可验证，见 [04-dev](04-dev/)
+- [x] **定时备份** —— 每天 04:00 全量备份所有虚拟机到 2T 盘，保留 3 份
 - [ ] k8s 集群
 - [ ] 推理服务
 
