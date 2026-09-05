@@ -207,6 +207,26 @@ proxy-groups:
     #    要等 interval 到期才自愈。实测启动后 5 分钟内通用流量全走了自建节点。
     lazy: false
 
+  # ── GitHub ────────────────────────────────────────────────
+  # 🔴 为什么单独建组而不并进 AI服务：两者候选完全相同（都是
+  #    [自建线路, REJECT]），行为没有区别 —— 单独建组是为了【日志和面板里
+  #    能把 GitHub 流量与 AI 流量分开看】，排查时不至于混成一片。
+  #
+  # 🔴 为什么用 REJECT 收尾而不退回订阅：和 AI 同一条原则 —— 宁可显性失败，
+  #    不要静默换出口。GitHub 本身不涉及账号风险（用订阅只是慢），但保持
+  #    "所有必须走自建的流量、失败方式一致"，心智模型更简单。
+  #
+  # 归入本组的理由：GitHub 是 AI agent 依赖链的一部分（安装、更新、拉依赖），
+  # 走固定独享 IP 比走多人共享且会漂移的订阅节点稳定得多。
+  - name: GitHub
+    type: fallback
+    proxies:
+      - 自建线路
+      - REJECT
+    url: https://www.gstatic.com/generate_204
+    interval: 180
+    lazy: false
+
   # 订阅线路：按 provider 里的顺序取第一个健康的。
   # 节点失败会自动切下一个，但健康时一直用同一个 —— 不按延迟动态切换。
   - name: 订阅线路
@@ -470,6 +490,22 @@ rules:
   - DOMAIN-SUFFIX,upstash.com,AI服务
   - DOMAIN-SUFFIX,mem0.ai,AI服务
   - DOMAIN-SUFFIX,zep.com,AI服务
+
+  # ── GitHub ────────────────────────────────────────────
+  # 2026-09-05 实测：在 vm-dev 上装 AI agent 时，raw.githubusercontent.com
+  # 落到了兜底的 MATCH,PROXY 走订阅节点。能用，但订阅是多人共享且会漂移的
+  # 节点，而它是 agent 安装/更新流程的一环 —— 哪天订阅抽风导致装不上或更
+  # 新失败，排查方向完全不明显。
+  #
+  # 🔴 github.com 一条即覆盖 api / codeload / ssh.github.com
+  #    （ssh config 里走的是 ssh.github.com:443），不用再单列。
+  - DOMAIN-SUFFIX,github.com,GitHub
+  - DOMAIN-SUFFIX,githubusercontent.com,GitHub
+  - DOMAIN-SUFFIX,githubassets.com,GitHub
+  - DOMAIN-SUFFIX,githubapp.com,GitHub
+  - DOMAIN-SUFFIX,github.io,GitHub
+  - DOMAIN-SUFFIX,github.dev,GitHub
+  - DOMAIN-SUFFIX,ghcr.io,GitHub
 
   # ── 国内直连 ──────────────────────────────────────────
   # 🔴 GEOSITE 必须在 GEOIP 前面：HTTP 代理请求携带的是域名，此时还没有 IP。

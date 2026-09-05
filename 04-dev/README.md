@@ -62,7 +62,21 @@ VM 121  vm-dev  192.168.5.21/24
 
 ### ② 规则覆盖
 
-180 条规则把 AI 域名判进 `AI服务` 策略组。除了逐条列出的具体域名，还有一条 `.ai` 顶级域兜底，接住将来新出现的服务。
+187 条规则把 AI 域名判进 `AI服务` 策略组。除了逐条列出的具体域名，还有一条 `.ai` 顶级域兜底，接住将来新出现的服务。
+
+**GitHub 单独一组，也走自建线路。** 2026-09-05 装 agent 时实测发现
+`raw.githubusercontent.com` 落到了兜底的 `MATCH,PROXY` 走订阅节点 —— 能用，
+但订阅是多人共享且会漂移的节点，而它是 agent 安装/更新流程的一环。
+
+```
+GitHub  fallback  [自建线路, REJECT]
+  ← 候选与 AI服务 完全相同，行为一致
+  ← 单独建组是为了【日志和面板里能把两类流量分开看】
+
+覆盖：github.com（含 api / codeload / ssh.github.com:443）、
+      githubusercontent.com、githubassets.com、githubapp.com、
+      github.io、github.dev、ghcr.io
+```
 
 规则本体与设计依据在 [02 · 旁路由](../02-gateway/)，此处不重复。
 
