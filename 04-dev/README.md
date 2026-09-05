@@ -327,7 +327,120 @@ tmux capture-pane -t agent -p             # 把输出抓出来
 
 ---
 
-## 6. 坑
+## 6. 🔴 自建线路挂掉时怎么排查
+
+`AI服务` 与 `GitHub` 两组的候选都是 `[自建线路, REJECT]` —— **严格模式**。自建线路一旦不健康，这两类流量直接被拒绝，不会退回订阅节点。
+
+这是刻意的设计（宁可显性失败，不要静默换出口），但**第一次遇到时的现象很迷惑**，得知道怎么认。
+
+### 6.1 症状：一种"半瘫"状态
+
+```
+❌ AI agent 报连接失败 / API 超时
+❌ git push / git clone 直接失败
+✅ 网页能开、视频能看、apt 能装        ← 这些走 MATCH,PROXY → 订阅线路，不受影响
+```
+
+🔴 **最容易的误判是「Anthropic 挂了」或「GitHub 抽风了」** —— 因为别的网都好好的，很难第一时间想到是自己的出口线路问题。
+
+**记住这个特征：只有 AI 和 GitHub 挂、其他全正常 = 几乎必然是自建线路的问题。**
+
+### 6.2 一条命令确诊
+
+在 `vm-router` 上：
+
+```bash
+# 这两个变量下面反复用到，先取出来（secret 只进变量，不打印）
+S=$(sudo sed -n 's/^secret: *//p' /etc/mihomo/config.yaml | head -1 | tr -d "\"'")
+P=$(sudo sed -n 's/^external-controller: *//p' /etc/mihomo/config.yaml | head -1 | sed 's/.*://')
+
+curl -s -H "Authorization: Bearer $S" "http://127.0.0.1:$P/proxies/AI%E6%9C%8D%E5%8A%A1" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["now"])'
+```
+
+| 输出 | 结论 |
+|---|---|
+| `自建线路` | ✅ **不是这个问题**，去查别处（DNS？规则？源站真的挂了？） |
+| `REJECT` | 🔴 **确诊** —— 自建线路被判定为不健康，往下走 6.3 |
+
+> `GitHub` 组同理，把 URL 里的组名换成 `GitHub` 即可。
+
+### 6.3 分层定位：到底哪一层断了
+
+**从上往下查，第一个失败的那层就是根因所在。**
+
+```bash
+# ── 第 1 层：mihomo 认为哪个节点健康 ──
+curl -s -H "Authorization: Bearer $S" "http://127.0.0.1:$P/proxies/%E8%87%AA%E5%BB%BA%E7%BA%BF%E8%B7%AF" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); h=d.get("history") or []; print(d["now"], h[-1] if h else "无检查记录")'
+
+# ── 第 2 层：两个节点分别测延迟（区分"节点问题"还是"整条链路问题"）──
+for n in Trojan-3xUI VMess-3xUI; do
+  printf '%-14s ' "$n"
+  curl -s -H "Authorization: Bearer $S" \
+    "http://127.0.0.1:$P/proxies/$n/delay?timeout=5000&url=https://www.gstatic.com/generate_204"
+  echo
+done
+
+# ── 第 3 层：TCP 能不能连上服务器端口（服务器地址/端口见 mihomo.local.env）──
+SRV=$(sudo grep -m1 -A3 'name: Trojan-3xUI' /etc/mihomo/config.yaml | grep 'server:' | awk '{print $2}')
+PRT=$(sudo grep -m1 -A4 'name: Trojan-3xUI' /etc/mihomo/config.yaml | grep 'port:'   | awk '{print $2}')
+timeout 6 bash -c "exec 3<>/dev/tcp/$SRV/$PRT" && echo "TCP 可连接" || echo "TCP 连不上"
+
+# ── 第 4 层：ICMP 能不能通（服务器本身在不在）──
+ping -c3 "$SRV"
+```
+
+**对照表 —— 哪层断了说明什么：**
+
+| 现象 | 根因指向 | 处理 |
+|---|---|---|
+| 1 层：`now` 是 `REJECT`，但 2 层两个节点延迟都正常 | mihomo 的健康数据过期 | 手动触发一次延迟测试（第 2 层那条命令）即可自愈 |
+| 2 层：**一个节点超时、另一个正常** | 单个协议被阻断 | 无需处理，`fallback` 会自动切换。若两个都常超时，考虑换协议或端口 |
+| 2 层：两个都超时，但 3 层 TCP 通 | **服务端进程问题** —— 端口开着但服务没在正常应答 | 上服务器看 3x-ui 面板 / 重启服务；也可能是 TLS 证书过期 |
+| 3 层：TCP 连不上，但 4 层 ICMP 通 | **端口被封或防火墙变更** | 服务器还活着。查安全组 / iptables，或换端口 |
+| 4 层：ICMP 也不通 | **服务器本身不可达** | VPS 关机 / 欠费 / IP 被墙。上服务商控制台看 |
+| 全部正常，但 AI 仍失败 | 不是线路问题 | 回到 [§4 的四层验证](#4-验证--四层缺一层就不算数)，多半是 DNS 或规则 |
+
+> **参考值**（2026-09 实测）：ICMP 约 **173 ms**（`mdev` 0.03 ms，链路很稳）；节点延迟 **1500–3000 ms**。
+>
+> 🔴 **别被这个延迟数字吓到。** 它测的是完整 HTTPS 请求（TCP 握手 + TLS 握手 + HTTP），不是单纯 RTT。173 ms 的基础 RTT × 3–4 个往返 ≈ 600 ms 起步，1500–3000 ms 属于正常范围。**只有超时（`delay` 为 0 或报错）才是真问题。**
+
+### 6.4 🔴 应急：严格模式下没有"一键切换"
+
+`AI服务` 与 `GitHub` 是 **`fallback` 类型**，候选里**根本没有订阅线路** —— 所以：
+
+- ❌ 面板上**切不了**（fallback 组是自动选择，不接受手动指定）
+- ❌ 也没有"临时降级"开关
+
+**这是严格模式的代价，设计如此。** 真要应急放行，只能改配置：
+
+```bash
+# 1. 在 config.yaml.tmpl 里给对应组的候选临时加一条 订阅线路
+#      proxies:
+#        - 自建线路
+#        - 订阅线路      ← 临时加
+#        - REJECT
+# 2. 走标准下发流程（渲染 → 投递 → 校验 → 覆盖 → 热重载）
+# 3. 🔴 恢复后【务必删掉】，否则严格保障就永久失效了，而且你不会察觉
+```
+
+**建议先别急着降级** —— 先按 6.3 定位。多数情况是服务器侧几分钟能修好的问题，而临时加的候选很容易忘记删。
+
+### 6.5 恢复后的验证
+
+```bash
+# 组已切回自建线路？
+curl -s -H "Authorization: Bearer $S" "http://127.0.0.1:$P/proxies/AI%E6%9C%8D%E5%8A%A1" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["now"])'      # 应为 自建线路
+
+# 实际流量走通了？（从 vm-dev 发一条，再回 vm-router 看日志）
+# 见 §4 的第 ③ 层验证
+```
+
+---
+
+## 7. 坑
 
 | 症状 | 根因 | 处理 |
 |---|---|---|
@@ -337,10 +450,12 @@ tmux capture-pane -t agent -p             # 把输出抓出来
 | 新用的 AI 服务悄悄走了订阅 | 规则是静态列表，必然有漏网 | 定期跑第 ③ 层验证 |
 | `init-clone.sh` 跑完 `accept-ra` 没了 | 该脚本会重写整个 netplan | 见 [§3.6](#36--遗留init-clonesh-会覆盖-netplan) |
 | 长任务随 SSH 断线终止 | 前台进程收到 SIGHUP | 在 tmux 里跑 |
+| **只有 AI 和 GitHub 挂，其他网都正常** | 自建线路不健康 → 严格模式 REJECT | 🔴 见 [§6](#6--自建线路挂掉时怎么排查)。**别先怀疑源站**，这个特征几乎必然是出口线路问题 |
+| 节点延迟显示 1500–3000ms，以为坏了 | 测的是完整 HTTPS 请求，不是 RTT | 正常。基础 RTT 173ms × 3–4 个往返 ≈ 600ms 起步，**只有超时才是问题** |
 
 ---
 
-## 7. 速查
+## 8. 速查
 
 ```bash
 # ── 一键自检：四层里最关键的两层 ──
@@ -355,6 +470,14 @@ resolvectl dns; cat /proc/sys/net/ipv6/conf/enp6s18/accept_ra
 # 1. DNS 拿到的是不是 fake-ip     → 不是就查 §3
 # 2. mihomo 日志命中了哪条规则     → using PROXY 就是泄漏，补规则
 # 3. AI服务 组当前选中哪个候选     → 应为 自建线路，REJECT 说明自建线路不健康
+
+# ── 自建线路挂了？在 vm-router 上一条命令确诊（详见 §6）──
+S=$(sudo sed -n 's/^secret: *//p' /etc/mihomo/config.yaml | head -1 | tr -d "\"'")
+P=$(sudo sed -n 's/^external-controller: *//p' /etc/mihomo/config.yaml | head -1 | sed 's/.*://')
+curl -s -H "Authorization: Bearer $S" "http://127.0.0.1:$P/proxies/AI%E6%9C%8D%E5%8A%A1" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["now"])'
+#   自建线路 = 线路正常，问题在别处
+#   REJECT   = 确诊，按 §6.3 分四层定位
 ```
 
 ---
