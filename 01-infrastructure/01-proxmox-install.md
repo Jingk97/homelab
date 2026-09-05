@@ -608,9 +608,10 @@ Proxmox VE 9 基于 **Debian 13 "trixie"**，用的是新的 **deb822 格式（`
 > 阿里云**没有镜像 Proxmox 仓库**（实测 `mirrors.aliyun.com/proxmox/...` 返回 404），
 > 只能用中科大；而 Debian 基础源两家都有，用阿里云。
 >
-> 🔴 **不要用清华 TUNA。** 2026-09-04 实测它封禁了本地出口 IP，
-> `apt` / `pypi` / ISO 下载一律 403，连镜像站根目录都进不去，
-> 且返回的是它自己的 HTML 提示页而不是可读的错误。
+> 🔴 **不要用清华 TUNA。** 它拒绝本地这个 IPv4（接受 IPv6，但光猫的 IPv6
+> WAN 已关闭，直连只剩 IPv4），`apt` / `pypi` / ISO 一律 403，连镜像站根目录
+> 都进不去，返回的还是它自己的 HTML 提示页。
+> 完整机制见 [02 · 旁路由「坑 9」](../02-gateway/README.md)。
 
 ```bash
 cat > /etc/apt/sources.list.d/proxmox.sources <<'EOF'

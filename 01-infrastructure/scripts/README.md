@@ -54,7 +54,7 @@ SKIP_LANG=1   ./provision-base.sh                   # 跳过语言运行时
 | 模块 | 内容 |
 |---|---|
 | M0 | 拒绝 root、系统版本、sudo、代理设置、**GitHub 与镜像站连通性预检** |
-| M1 | apt 换清华镜像（deb822）+ 全量更新 |
+| M1 | apt 换阿里云镜像（deb822）+ 全量更新 |
 | M2 | 时区 / NTP / DNS 兜底 / **journald 保留 15 天上限 1G** / locale / sudo 免密 |
 | M3 | 运维工具：htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux |
 | M4 | 研发工具：git build-essential jq ripgrep fd bat yq |
@@ -80,7 +80,8 @@ Failed to fetch https://mirrors.aliyun.com/ubuntu/dists/noble/InRelease
 脚本会**主动 unset 继承来的代理变量**，否则 apt 会继承它们照样踩 403。代理只在本次执行生效，不写入任何持久化配置。
 
 > 🔴 **但反过来不成立：镜像站返回 403 不等于"走了代理"。**
-> 2026-09-04 实测：清华 TUNA 对本地出口 IP 直接封禁，**直连状态下**
+> 2026-09-04 实测：清华 TUNA 拒绝本地这个 IPv4（它接受 IPv6，但光猫的
+> IPv6 WAN 已关，所以直连只剩 IPv4），**直连状态下**
 > 连镜像站根目录都是 403（返回它自己的"您目前无法访问此页面"页面），
 > 而同一时刻旁路由日志明确显示该域名命中 `GeoSite(cn) using DIRECT`，
 > 流量根本没经过代理。

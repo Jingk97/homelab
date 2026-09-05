@@ -63,8 +63,9 @@ https://mirrors.aliyun.com/ubuntu-releases/24.04/
 https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/
 ```
 
-> 🔴 **不要用清华 TUNA。** 2026-09-04 实测它封禁了本地出口 IP，ISO 下载同样
-> 403，且返回的是它自己的 HTML 提示页而不是可读的错误。
+> 🔴 **不要用清华 TUNA。** 它拒绝本地这个 IPv4（接受 IPv6，但光猫的 IPv6
+> WAN 已关闭），ISO 下载同样 403，返回的还是它自己的 HTML 提示页。
+> 完整机制见 [02 · 旁路由「坑 9」](../02-gateway/README.md)。
 
 等价的 Shell 操作：
 
@@ -525,8 +526,9 @@ Failed to fetch https://mirrors.aliyun.com/ubuntu/dists/noble/InRelease
 **原因**：apt 把国内镜像的请求也发给了代理，代理转发到境外节点 → **出口 IP 变成境外** → 镜像站返回 403。
 
 > 🔴 **但反过来不成立：403 不等于走了代理。**
-> 2026-09-04 实测，清华 TUNA 在**完全直连**的状态下也返回 403 —— 它封禁了
-> 本地出口 IP，与代理无关。当时旁路由日志明确显示该域名命中
+> 2026-09-04 实测，清华 TUNA 在**完全直连**的状态下也返回 403 —— 它拒绝的是
+> 本地这个 IPv4（见 [02 · 旁路由「坑 9」](../02-gateway/README.md)），与代理
+> 无关。当时旁路由日志明确显示该域名命中
 > `GeoSite(cn) using DIRECT`，流量根本没经过代理。
 >
 > **诊断顺序**：① 先看方括号里的 IP —— 是内网代理地址（如上例）才说明走了
@@ -541,11 +543,11 @@ Failed to fetch https://mirrors.aliyun.com/ubuntu/dists/noble/InRelease
 
 | 目标 | 走代理？ | 说明 |
 |---|---|---|
-| M1 apt / M3 / M4 / M5 的 apt install | 🔴 **直连** | 清华镜像 |
-| M5 pip | 🔴 直连 | 清华镜像 |
+| M1 apt / M3 / M4 / M5 的 apt install | 🔴 **直连** | 阿里云镜像 |
+| M5 pip | 🔴 直连 | 阿里云镜像 |
 | M6 Go 版本查询 + tarball | 🔴 **直连** | `golang.google.cn` 是 Go 官方中国站点 |
 | M6 GOPROXY | 🔴 直连 | `goproxy.cn` |
-| M7 Node 二进制 | 🔴 直连 | 清华 `nodejs-release` |
+| M7 Node 二进制 | 🔴 直连 | 阿里云 `nodejs-release` |
 | **M0 GitHub 预检** | 🟢 **走代理** | |
 | **M4 yq** | 🟢 走代理 | `github.com/mikefarah/yq/releases` |
 | **M5 uv** | 🟢 走代理 | `astral.sh` → GitHub releases |
@@ -630,7 +632,7 @@ M0 会自动做上面这两项预检并打印结果。
 | 模块 | 内容 | 关键说明 |
 |---|---|---|
 | **M0** 前置检查 | 拒绝 root 直跑、确认系统、确认 sudo、**清除继承的代理变量、预检国内镜像直连 + GitHub 经代理** | 见 5.2.1 |
-| **M1** apt 源 + 更新 | 切清华镜像（**deb822 格式**）+ `full-upgrade` | Ubuntu 24.04 用 `.sources` 而非 `.list`，格式不同 |
+| **M1** apt 源 + 更新 | 切阿里云镜像（**deb822 格式**）+ `full-upgrade` | Ubuntu 24.04 用 `.sources` 而非 `.list`，格式不同 |
 | **M2** 系统基础 | 时区 / NTP / DNS / journald / locale / sudo 免密 | 详见下表 |
 | **M3** 运维工具 | `htop btop ncdu mtr tcpdump nmap rsync sysstat smartmontools tmux vim …` | |
 | **M4** 研发工具 | `git build-essential jq ripgrep fd bat yq` | Ubuntu 把 `bat`/`fd` 打包成 `batcat`/`fdfind`，脚本建了软链恢复常用名 |

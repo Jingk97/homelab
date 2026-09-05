@@ -21,8 +21,9 @@
 #   代理【只作用于境外目标】（GitHub / astral.sh / go.dev），
 #   国内镜像（阿里云 / golang.google.cn / npmmirror）一律直连。
 #   把国内源也塞进代理会导致镜像站返回 403 —— 因为出口 IP 变成了境外。
-#   🔴 但反过来不成立：镜像站 403 不等于走了代理。清华 TUNA 就在
-#      直连状态下封禁了本机出口 IP（2026-09-04 实测），所以本脚本改用阿里云。
+#   🔴 但反过来不成立：镜像站 403 不等于走了代理。清华 TUNA 拒绝的是本机这个
+#      IPv4（它接受 IPv6，但光猫 IPv6 WAN 已关），直连状态下同样 403。
+#      详见 02-gateway/README.md 的「坑 9」。所以本脚本改用阿里云。
 #
 set -euo pipefail
 
@@ -46,8 +47,9 @@ trap _on_err ERR
 # ──────────────────────────────────────────────────────────────
 # 全局变量
 # ──────────────────────────────────────────────────────────────
-# 🔴 2026-09-04 从清华改为阿里云：清华 TUNA 封禁了本地出口 IP，
-#    apt / pypi 全部返回 403（连镜像站根目录都进不去），且不报可读的错。
+# 🔴 2026-09-04 从清华改为阿里云：清华 TUNA 拒绝本地这个 IPv4，而旁路由的
+#    ipv6:false 让 DIRECT 只能走 IPv4，于是 apt / pypi 全部 403（连镜像站
+#    根目录都进不去），且不报可读的错。详见 02-gateway/README.md「坑 9」。
 #    实测阿里云的三个路径与清华完全一致（ubuntu/ 、pypi/web/simple 、
 #    nodejs-release/），所以只换主机名即可，不用改下面任何路径。
 readonly MIRROR_HOST="mirrors.aliyun.com"
@@ -66,7 +68,7 @@ SKIP_LANG="${SKIP_LANG:-0}"
 # ── 代理处理 ──────────────────────────────────────────────────
 # 关键设计：代理【不做全局导出】，只在访问境外目标的那几条命令上临时施加。
 #
-# 原因：国内镜像（清华 / golang.google.cn / npmmirror）走代理时，
+# 原因：国内镜像（阿里云 / golang.google.cn / npmmirror）走代理时，
 #       出口 IP 变成境外，镜像站会返回 403 Forbidden 直接失败。
 #
 # 如果调用者在环境里已经 export 过代理，这里把它【收编】进 PROXY_URL，
@@ -192,9 +194,9 @@ m0_precheck() {
   # 5. 国内镜像连通性 —— 这些必须【直连】能通，走代理反而会 403
   info "检测国内镜像连通性（直连）…"
   if curl -fsS --connect-timeout 8 -o /dev/null "https://${MIRROR_HOST}/" 2>/dev/null; then
-    info "清华镜像：可达 ✓"
+    info "${MIRROR_HOST}：可达 ✓"
   else
-    warn "清华镜像直连不通 —— apt / pip / node 下载会失败"
+    warn "${MIRROR_HOST} 直连不通 —— apt / pip / node 下载会失败"
     warn "检查一下机器的 DNS 和网关配置是否正常"
   fi
 
@@ -670,7 +672,7 @@ EOF
   . "${nvm_dir}/nvm.sh"
 
   if [[ "$SKIP_MIRROR" != "1" ]]; then
-    # Node 二进制从清华镜像下载 —— 【直连】，此处不能有代理变量
+    # Node 二进制从 ${MIRROR_HOST} 下载 —— 【直连】，此处不能有代理变量
     export NVM_NODEJS_ORG_MIRROR="https://${MIRROR_HOST}/nodejs-release/"
   fi
 

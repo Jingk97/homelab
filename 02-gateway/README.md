@@ -1113,7 +1113,9 @@ gecko.zijieapi.com:443         match GeoSite(cn) using DIRECT
 □ 🔴 停机窗口：装 2.5 寸 SATA 盘；重启 mihomo 让 Nice / OOMScoreAdjust / GOMEMLIMIT 生效
 □ 观察数天，关注是否有设备异常
 □ 各设备关掉本地代理（Surge / Clash 客户端），避免双重代理 —— 见坑 17
-□ apt 源从清华换到阿里云/中科大（ipv6:false 的副作用，见坑 9）
+☑ apt 源从清华换到阿里云/中科大（ipv6:false 的副作用，见坑 9）—— 2026-09-04 完成：
+     provision-base.sh 的 MIRROR_HOST、PVE 宿主机、vm-router、vm-media、vm-dev 全部已换；
+     Proxmox 源用中科大（阿里云不镜像 Proxmox，实测 404）
 □ ⑩ 断电演练：BIOS「断电后恢复 = 电源开启」+ 拔插线板计时
 □ healthcheck.sh：把五层体检做成退出码信号（内存判据用 PSI，不用被 page cache 误导的 used）
 □ 宿主机看门狗：VM 挂了自动拉起（L2 层自愈）

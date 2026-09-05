@@ -298,7 +298,7 @@ m3_check_system() {
   #    apt / pypi 一律 403，连镜像站根目录都进不去。检测到清华要报警，
   #    否则体检会给出"一切正常"的假信号，而实际上这台机器装不了任何包。
   if grep -rqs 'mirrors\.tuna\.tsinghua\.edu\.cn' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-    bad "apt 镜像源" "清华（本地 IP 被封，会 403）—— 换成 mirrors.aliyun.com"
+    bad "apt 镜像源" "清华（拒绝本机 IPv4，会 403）—— 换成 mirrors.aliyun.com"
   elif grep -rqs 'aliyun\|ustc' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     ok "apt 镜像源" "国内镜像 (deb822)"
   else
