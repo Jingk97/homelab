@@ -134,6 +134,15 @@ m0_precheck() {
   if [[ -f "${KEY_PATH}.pub" ]]; then
     info "  指纹：$(ssh-keygen -lf "${KEY_PATH}.pub" | awk '{print $2}')"
   fi
+
+  # 🔴 提前探测 sudo，别等到 M2 写到一半才发现拿不到权限。
+  #    -n = 非交互：能用缓存凭据就返回 0，需要密码则立即失败不阻塞。
+  if sudo -n true 2>/dev/null; then
+    done_ "sudo：免密可用"
+  else
+    warn "sudo 需要输密码 —— M2 会在终端提示你输入"
+    info "  若在无终端环境（CI / 自动化）执行，M2 会失败并中止，这是预期行为"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -240,7 +249,13 @@ ${block}"
   fi
 
   info "下面这步需要提权（只改 /etc/hosts 这一个文件）"
-  sudo cp -a "${HOSTS_FILE}" "${HOSTS_FILE}.bak-${TS}"
+
+  # 🔴 每个 sudo 都必须检查返回值。早期版本没检查，结果在无终端环境里
+  #    sudo 拿不到密码直接失败，脚本却照样打印「已写入并刷新 DNS 缓存」——
+  #    一个声称写了但实际没写的脚本，比没有脚本更危险。
+  if ! sudo cp -a "${HOSTS_FILE}" "${HOSTS_FILE}.bak-${TS}"; then
+    die "无法备份 ${HOSTS_FILE} —— 拿不到 sudo 权限，已中止（未做任何修改）"
+  fi
   info "已备份 → ${HOSTS_FILE}.bak-${TS}"
 
   local tmp
@@ -248,13 +263,21 @@ ${block}"
   printf '%s\n' "${want}" > "${tmp}"
   # 🔴 用 cat 重定向而不是 mv：mv 会把临时文件的属主和权限带过去，
   #    /etc/hosts 必须保持 root:wheel 644。cat 只改内容，不动 inode 属性。
-  sudo sh -c "cat '${tmp}' > '${HOSTS_FILE}'"
+  if ! sudo sh -c "cat '${tmp}' > '${HOSTS_FILE}'"; then
+    rm -f "${tmp}"
+    die "写入 ${HOSTS_FILE} 失败 —— 备份在 ${HOSTS_FILE}.bak-${TS}"
+  fi
   rm -f "${tmp}"
+
+  # 落盘后立刻回读校验，不靠 sudo 的退出码一面之词
+  if ! grep -q "${BEGIN_MARK}" "${HOSTS_FILE}"; then
+    die "写入后回读校验失败：${HOSTS_FILE} 里找不到标记块"
+  fi
 
   # macOS 有 DNS 缓存，改完 hosts 不刷新可能几分钟内还解析旧值
   sudo dscacheutil -flushcache 2>/dev/null || true
   sudo killall -HUP mDNSResponder 2>/dev/null || true
-  done_ "已写入并刷新 DNS 缓存"
+  done_ "已写入并回读校验通过（$(grep -c '192\.168\.5\.' "${HOSTS_FILE}") 条地址）"
 }
 
 # ──────────────────────────────────────────────────────────────
